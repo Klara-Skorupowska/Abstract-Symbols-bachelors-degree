@@ -88,8 +88,12 @@ class TheAgent(Agent):
         self.start_time = None
         self.end_time = None
         self.run_count = 0
+        self.full_clean_run_count = 0
         self.batch_update_count = 0
         self.timestamps = []
+        self.test_stats_path = os.path.join(self.log_dir, "test_statistics.json")
+        self.test_stats_txt_path = os.path.join(self.log_dir, "test_statistics.txt")
+        self.test_step_executions = []
 
         ### --- brain --- ###
         
@@ -111,17 +115,23 @@ class TheAgent(Agent):
         self.bus.call_service("/supervisor/do/restart")
 
     def _get_latest_session(self, logs_root):
-        target_dir = None
-        if os.path.exists(logs_root):
-            session_dirs = [
-                os.path.join(logs_root, d) for d in os.listdir(logs_root) 
-                if os.path.isdir(os.path.join(logs_root, d))
-            ]
-            if session_dirs:
-                target_dir = max(session_dirs, key=os.path.basename)
-        return target_dir
+        if not os.path.exists(logs_root):
+            return None
 
-    def _logger(self, run, tests_runned=False):
+        def parse_session_timestamp(dir_name):
+            try:
+                return datetime.strptime(dir_name, "%Y-%m-%d_%H-%M")
+            except ValueError:
+                return None
+
+        valid_sessions = []
+        for entry in os.scandir(logs_root):
+            if entry.is_dir() and parse_session_timestamp(entry.name):
+                valid_sessions.append(entry.path)
+
+        return max(valid_sessions, key=os.path.basename, default=None)
+
+    def _logger(self, run):
         if self.stats_path:
             end_time = time.time() if self.end_time is None else self.end_time
             with open(self.stats_path, "w") as f:
@@ -138,7 +148,7 @@ class TheAgent(Agent):
                 duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
                 
                 f.write(f"start time: {start_str} | end time: {end_str} | duration: {duration_str}\n")
-                f.write(f"runs: {run}; brain updates: {self.batch_update_count}\n")
+                f.write(f"runs: {run}; brain updates: {self.batch_update_count}; clean runs: {self.full_clean_run_count}\n")
                 f.write(f"{'Skill Name':<20} | {'True Positive':<15} | {'True Negative':<15} | {'false Positive':<15} | {'false Negative':<15} | {'Total':<15}\n")
                 f.write("-" * 100 + "\n")
                 for sk_name, counts in self.skill_stats.items():
@@ -147,14 +157,6 @@ class TheAgent(Agent):
                 f.write("-" * 100 + "\n")
                 for log in self.logs:
                     f.write(f"{log}\n")
-                if tests_runned:
-                    f.write("-" * 100 + "\n")
-                    successes = sum(test[5] for test in self.tests)
-                    f.write(f"tests: {self.N_tests}, successes: {successes}\n")
-                    f.write(f"{'Test':<20} | {'Plan Length':<15} | {'Steps Executed':<15} | {'Last Action':<15} | {'Duration [s]':<15} | {'Result':<15}\n")
-                    for test in self.tests:
-                        t_run, length, steps_executed, last_step, t_duration, result = test
-                        f.write(f"{t_run+1:<20} | {length:<15} | {steps_executed:<15} | {last_step:<15} | {t_duration:<15.3f} | {result:<10}\n")
 
         if self.timestamps_path:
             with open(self.timestamps_path, "w") as f:
@@ -234,7 +236,7 @@ class TheAgent(Agent):
                     self.previous_skill.succeed = True
                 if start_skill == 'Start' and finish_skill == 'Finish' and plan_completed:
                     print("[Agent] Clear Run from Start to Finish.")
-                    break
+                    self.full_clean_run_count += 1
 
         except Exception as e:
             import traceback
@@ -246,8 +248,7 @@ class TheAgent(Agent):
             self.end_time = time.time()
             self.brain._logger()
             self.save_offline_dataset()
-            self.test_run()
-            self._logger(self.run_count, tests_runned=True)
+            self._logger(self.run_count)
 
     def execute_skill(self, skill_name, prev_skill: ExecutedSkill):
         print(f"[Agent] Execute Skill")
@@ -315,21 +316,20 @@ class TheAgent(Agent):
     def generate_plan(self, start_skill=None, goal_skill=None, plan_name = None):
         print("[Agent] Generate Plan")
         vector_state = self.read_state()
-        if start_skill is None or goal_skill is None:
+        if start_skill is None:
             active_skills = self.brain.get_active_skills(vector_state)
             if not active_skills:
                 print(f"[Agent] No active skills.")
                 return [], None, None 
             print(f"[Agent] Active predicates: {active_skills}")
-            if start_skill is None:
-                start_skill = random.choice(active_skills)
-            if goal_skill is None:
-                nodes = self.brain.get_nodes()
-                nodes = [n for n in nodes if n != start_skill]
-                if not nodes:
-                    print(f"[Agent] No nodes in transitional graph.")
-                    return [], None, None
-                goal_skill = random.choice(nodes)
+            start_skill = random.choice(active_skills)
+        if goal_skill is None:
+            nodes = self.brain.get_nodes()
+            nodes = [n for n in nodes if n != start_skill]
+            if not nodes:
+                print(f"[Agent] No nodes in transitional graph.")
+                return [], None, None
+            goal_skill = random.choice(nodes)
 
         print(f"[Agent] Generating plan from {start_skill} to {goal_skill}.")
 
@@ -377,19 +377,24 @@ class TheAgent(Agent):
             for line in f:
                 line = line.strip()
                 if not line or line.startswith(";"):
-                    continue 
+                    continue
 
                 parts = line.strip("()").split()
                 if len(parts) < 1:
                     continue
-            
+
                 action_name_lower = parts[0].lower()
+        
+                # Skip internal transition connectors
+                if action_name_lower.startswith("transition_"):
+                    continue
+
                 matched_skill = next(
-                    (sk for sk in self.skillset.keys() if sk.lower() == action_name_lower), 
+                    (sk for sk in self.skillset.keys() if sk.lower() == action_name_lower),
                     None
                 )
                 if matched_skill:
-                    executable_plan.append(matched_skill) 
+                    executable_plan.append(matched_skill)
 
         if len(executable_plan) <= 0:
             print(f"[Agent] Error: no executable plan.")
@@ -401,12 +406,15 @@ class TheAgent(Agent):
         return executable_plan, start_skill, goal_skill
 
     def test_run(self):
+        self.brain.abstract_symbols()
+        self.brain._logger()
+        self.test_step_executions = []
         for i in range(self.N_tests):
             print(f"[Agent] Test {i+1}/{self.N_tests}.")
             start = time.time()
             self.bus.call_service("/supervisor/do/restart")
-            plan, _, _ = self.generate_plan('Start', 'Finish', f"test_{i}")
             time.sleep(1.0)
+            plan, _, _ = self.generate_plan(goal_skill='Finish', plan_name=f"test_{i}")
             
             if len(plan) < 1:
                 steps_executed = 0
@@ -420,15 +428,34 @@ class TheAgent(Agent):
                     print(f"[Agent] Executing step {step+1}/{len(plan)}: {skill_name}")
                     prev_vector_state = self.read_state()
                     preconditions_are_met = self.brain.preconditions_met(skill_name, prev_vector_state)
+                    
                     if not preconditions_are_met:
                         print(f"[Agent] Preconditions are not met: {skill_name}")
+                        # Record failure due to unmet preconditions
+                        self.test_step_executions.append({
+                            'test_idx': i,
+                            'step': step,
+                            'skill': skill_name,
+                            'succeed': False,
+                            'reason': 'preconditions_failed'
+                        })
                         steps_executed = step
                         result = False
                         break
+                    
                     skill = self.skillset[skill_name]
                     succeed = skill.execute()
                     last_step = skill_name
                     steps_executed = step + 1
+
+                    # Record execution result for this step
+                    self.test_step_executions.append({
+                        'test_idx': i,
+                        'step': step,
+                        'skill': skill_name,
+                        'succeed': bool(succeed),
+                        'reason': 'execution'
+                    })
                     
                     if not succeed:
                         print(f"[Agent] Skill {skill_name} failed during execution.")
@@ -441,3 +468,88 @@ class TheAgent(Agent):
                 print(f"[Agent] Test succeed.")
             else:
                 print(f"[Agent] Test failed.")
+
+        # Run the logger at the end of all tests
+        self._test_logger()
+
+    def _test_logger(self):
+        if not self.tests:
+            print("[Agent] No test records to log.")
+            return
+
+        from statistics import mean, multimode
+
+        plan_lengths = [t[1] for t in self.tests]
+        steps_executed = [t[2] for t in self.tests]
+        durations = [t[4] for t in self.tests]
+        results = [1 if t[5] else 0 for t in self.tests]
+
+        # Calculate metrics
+        mean_plan_length = mean(plan_lengths) if plan_lengths else 0.0
+        mode_plan_length = multimode(plan_lengths) if plan_lengths else []
+
+        mean_steps_executed = mean(steps_executed) if steps_executed else 0.0
+        mode_steps_executed = multimode(steps_executed) if steps_executed else []
+
+        mean_execution_duration = mean(durations) if durations else 0.0
+        success_rate = mean(results) if results else 0.0
+
+        # Build graph-ready matrix: skill -> step -> {success: count, fail: count}
+        # Supports visualizing stacked/grouped bar charts of skill execution per step index
+        step_graph_data = {}
+        for entry in self.test_step_executions:
+            skill = entry['skill']
+            step = entry['step']
+            succeed = entry['succeed']
+
+            if skill not in step_graph_data:
+                step_graph_data[skill] = {}
+            if step not in step_graph_data[skill]:
+                step_graph_data[skill][step] = {'succeed': 0, 'fail': 0, 'total': 0}
+
+            if succeed:
+                step_graph_data[skill][step]['succeed'] += 1
+            else:
+                step_graph_data[skill][step]['fail'] += 1
+            step_graph_data[skill][step]['total'] += 1
+
+        summary = {
+            "total_tests": len(self.tests),
+            "success_rate": success_rate,
+            "mean_plan_length": mean_plan_length,
+            "mode_plan_length": mode_plan_length,
+            "mean_steps_executed": mean_steps_executed,
+            "mode_steps_executed": mode_steps_executed,
+            "mean_execution_time_s": mean_execution_duration,
+            "step_graph_data": step_graph_data,
+            "raw_step_executions": self.test_step_executions
+        }
+
+        # 1. Save machine-readable JSON for graph generation
+        if hasattr(self, 'test_stats_path') and self.test_stats_path:
+            with open(self.test_stats_path, "w") as f:
+                json.dump(summary, f, indent=4)
+            print(f"[Agent] Saved test plot data to {self.test_stats_path}")
+
+        # 2. Save human-readable text report
+        if hasattr(self, 'test_stats_txt_path') and self.test_stats_txt_path:
+            with open(self.test_stats_txt_path, "w") as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"TEST SESSION STATISTICS (N = {len(self.tests)})\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"Success Rate:                 {success_rate * 100:.2f}%\n")
+                f.write(f"Mean Plan Length:             {mean_plan_length:.2f}\n")
+                f.write(f"Mode Plan Length:             {mode_plan_length}\n")
+                f.write(f"Mean Steps Executed:          {mean_steps_executed:.2f}\n")
+                f.write(f"Mode Steps Executed:          {mode_steps_executed}\n")
+                f.write(f"Mean Plan Execution Time (s): {mean_execution_duration:.3f}\n\n")
+                
+                f.write("-" * 80 + "\n")
+                f.write("STEP-BY-STEP EXECUTION FREQUENCY & OUTCOMES\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"{'Skill Name':<20} | {'Step':<6} | {'Succeed':<8} | {'Failed':<8} | {'Total':<8}\n")
+                f.write("-" * 80 + "\n")
+                for sk_name, steps in sorted(step_graph_data.items()):
+                    for step_idx, counts in sorted(steps.items()):
+                        f.write(f"{sk_name:<20} | {step_idx:<6} | {counts['succeed']:<8} | {counts['fail']:<8} | {counts['total']:<8}\n")
+                f.write("=" * 80 + "\n")

@@ -83,15 +83,16 @@ class BrainNetwork:
                     self.nodes[node_name].effect.update(vector, True)
 
         self.trans_graph = Graph()
+        self.min_overlap_ratio = 0.7
 
-        self.max_points = 50
-        self.base_radius = 1.0
-        self.max_radius = 10.0
+        self.max_points = 85
+        self.base_radius = 0.15
+        self.max_radius = 1.75 
         self.learning_rate_b = 0.2
-        self.learning_rate_n = 0.02
-        self.max_edge_age = 30
-        self.lambda_step = 10
-        self.alpha = 0.5
+        self.learning_rate_n = 0.01
+        self.max_edge_age = 24
+        self.lambda_step = 5
+        self.alpha = 0.7
         self.d = 0.99
 
         self.log_dir = log_dir
@@ -108,10 +109,10 @@ class BrainNetwork:
             
     def create_node(self, skill_name):
         if skill_name not in self.trans_graph.nodes:
-            precondition = Predicate(self.max_points, self.base_radius, self.max_radius, 
+            precondition = Predicate(self.max_points, self.state_dim, self.base_radius, self.max_radius, 
                                      self.learning_rate_b, self.learning_rate_n, self.max_edge_age, 
                                      self.lambda_step, self.alpha, self.d)
-            effect = Predicate(self.max_points, self.base_radius, self.max_radius, 
+            effect = Predicate(self.max_points, self.state_dim, self.base_radius, self.max_radius, 
                                self.learning_rate_b, self.learning_rate_n, self.max_edge_age, 
                                self.lambda_step, self.alpha, self.d)
             self.trans_graph.add_node(skill_name, precondition, effect)
@@ -176,8 +177,12 @@ class BrainNetwork:
 
         self._logger()
             
-    def update_transitions(self, skill_name: str, min_overlap_ratio: float = 0.25):
-        src_node = self.trans_graph.nodes[skill_name]
+    def update_transitions(self, skill_name: str, min_overlap_ratio = None):
+        # if we can do A -> B, where A = skill_name, B = all others
+        if min_overlap_ratio is None:
+            min_overlap_ratio = self.min_overlap_ratio
+        
+        src_node = self.trans_graph.nodes[skill_name] # skill_name is the A
         eff_gng = src_node.effect
         
         existing_targets = [
@@ -186,43 +191,41 @@ class BrainNetwork:
             if skill_name in sources
         ]
 
-        if not eff_gng.nodes or len(eff_gng.nodes) < 2:
+        if not eff_gng.nodes or len(eff_gng.nodes) < 1:
             for target_skill in existing_targets:
-                self.delete_edge(skill_name, target_skill)
+                self.delete_edge(skill_name, target_skill) # delete all if there is no effect
             return {}
 
         overlapping_points_map = {}
-        total_nodes = len(eff_gng.nodes)
 
-        for target_skill, target_node in self.trans_graph.nodes.items():
-            if skill_name == target_skill:
-                continue
+        for target_skill, target_node in self.trans_graph.nodes.items(): # all others
+            if skill_name == target_skill: 
+                continue # no self loops
 
             init_gng = target_node.precondition
-            if not init_gng.nodes or len(init_gng.nodes) < 2:
+            if not init_gng.nodes or len(init_gng.nodes) < 1:
                 if target_skill in existing_targets:
-                    self.delete_edge(skill_name, target_skill)
+                    self.delete_edge(skill_name, target_skill) # delete this one if there is no init
                 continue
 
             # Check activation directly
             overlapping_points = [
                 node for node in eff_gng.nodes 
-                if init_gng.is_active(node)
+                if init_gng.is_active(node) # add if we can start target skill (init is active)
             ]
-            
-            overlap_ratio = len(overlapping_points) / total_nodes
+            overlap_ratio = len(overlapping_points) / len(eff_gng.nodes)
             
             # Require minimum threshold and count to reject noise
-            if overlap_ratio >= min_overlap_ratio and len(overlapping_points) >= 3:
-                self.trans_graph.add_edge(skill_name, target_skill, overlap_ratio)
+            if overlap_ratio >= min_overlap_ratio and len(overlapping_points) >= 1:
+                self.trans_graph.add_edge(skill_name, target_skill, overlap_ratio) # add if the overlap is good enough
                 overlapping_points_map[target_skill] = overlapping_points
             else:
                 if target_skill in existing_targets:
-                    self.delete_edge(skill_name, target_skill)
+                    self.delete_edge(skill_name, target_skill) # delete if it is no longer good
 
         return overlapping_points_map
 
-    def abstract_symbols(self):
+    def abstract_symbols(self): # I guesse it is unnecessary
         # Compute filtered transitions
         all_overlaps = {
             src_skill: self.update_transitions(src_skill)
@@ -239,7 +242,7 @@ class BrainNetwork:
 
                 init_gng = self.trans_graph.nodes[target_skill].precondition
                 sym_pred = Predicate(
-                    max_points=max(10, len(overlapping_points)),
+                    max_points=max(self.max_points, len(overlapping_points)),
                     base_radius=init_gng.base_radius,
                     max_radius=init_gng.max_radius,
                     learning_rate_b=self.learning_rate_b,
@@ -263,12 +266,39 @@ class BrainNetwork:
             
         pddl.append("  )")
 
-        for src_name in self.trans_graph.nodes.keys():
+        # Compute max/average outgoing transition weight for sorting source nodes
+        def get_source_priority(src_name):
+            weights = []
+            for target_name, sources in self.trans_graph.edges_by_target.items():
+                if src_name in sources:
+                    edge = sources[src_name]
+                    w = edge.weight if edge.weight is not None else 0.0
+                    weights.append(w)
+            return max(weights) if weights else 0.0
+
+        # Sort source skills so highest-overlap branches appear first
+        sorted_sources = sorted(
+            self.trans_graph.nodes.keys(),
+            key=get_source_priority,
+            reverse=True
+        )
+
+        for src_name in sorted_sources:
             targets = [
                 target
                 for target, sources in self.trans_graph.edges_by_target.items()
                 if src_name in sources
             ]
+
+            # Sort target transitions by weight descending (highest overlap first)
+            targets.sort(
+                key=lambda t: (
+                    self.trans_graph.edges_by_target[t][src_name].weight
+                    if self.trans_graph.edges_by_target[t][src_name].weight is not None
+                    else 0.0
+                ),
+                reverse=True
+            )
 
             pddl.extend([
                 "",
@@ -375,8 +405,7 @@ class BrainNetwork:
             "parameters": parameters,
             "nodes": [n.tolist() for n in predicate.nodes],
             "edges": edges_str_keys,
-            "local_radii": radii,
-            "local_radiuses": radii
+            "local_radii": radii
         }
         file_path = os.path.join(self.gas_dir, f"{skill_name}_{pred_type}.json")
         temp_file = os.path.join(self.gas_dir, f"{skill_name}_{pred_type}.tmp")
@@ -399,32 +428,41 @@ class BrainNetwork:
     def load_predicate(file_path) -> Predicate:
         with open(file_path, "r") as f:
             data = json.load(f)
-            
+        
         params = data.get("parameters", {})
         pred = Predicate(
-            max_points=params.get("max_points"),
+            max_points=params.get("max_points", 50),
             base_radius=params.get("base_radius", 0.1),
             max_radius=params.get("max_radius", 1.0),
             learning_rate_b=params.get("learning_rate_b", 0.2),
-            learning_rate_n=params.get("learning_rate_n", 0.006),
-            max_edge_age=params.get("max_edge_age", 5),
-            lambda_step=params.get("lambda_step", 1),
+            learning_rate_n=params.get("learning_rate_n", 0.02),
+            max_edge_age=params.get("max_edge_age", 30),
+            lambda_step=params.get("lambda_step", 10),
             alpha=params.get("alpha", 0.5),
-            d=params.get("d", 0.995)
+            d=params.get("d", 0.99)
         )
 
         if "nodes" in data:
-            pred.nodes = [np.array(n) for n in data["nodes"]]
-            pred.errors = [0.0] * len(pred.nodes) 
-            
+            pred.nodes = [np.array(n, dtype=float) for n in data["nodes"]]
+            pred.errors = [0.0] * len(pred.nodes)
+
+        # Restore the saved radii!
+        if "local_radii" in data:
+            pred.cached_radii = data["local_radii"]
+        
         if "edges" in data:
             parsed_edges = {}
             for k, v in data["edges"].items():
                 u, v_node = map(int, k.split(","))
                 parsed_edges[(u, v_node)] = v
             pred.edges = parsed_edges
-            pred.tidy()
-            
+        
+            # Populate adj
+            pred.adj = {}
+            for (u, v) in pred.edges.keys():
+                pred.adj.setdefault(u, set()).add(v)
+                pred.adj.setdefault(v, set()).add(u)
+        
         return pred
 
     def load_brain(self, source_dir):

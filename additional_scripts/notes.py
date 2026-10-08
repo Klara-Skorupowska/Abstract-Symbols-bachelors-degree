@@ -1,3 +1,6 @@
+import random
+import os
+import numpy as np
 def run(self):
         try:
             n = 50

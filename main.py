@@ -6,7 +6,7 @@ import threading
 
 import time
 import re
-import datetime
+from datetime import datetime
 
 from simulation import *
 from agent import *
@@ -53,22 +53,25 @@ def main(session_dir, runs, tests):
 
 
 def get_success_rate(file_path: str) -> float:
-    with open(file_path, "r", encoding="utf-8") as f:
-        content = f.read()
+    """
+    Reads the success rate from either the new test_statistics.json file,
+    the new test_statistics.txt report, or falls back to execution_statistics.txt.
+    Returns the success rate as a percentage (0.0 to 100.0).
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
 
-    match = re.search(r"tests:\s*(\d+),\s*successes:\s*(\d+)", content)
-    if not match:
-        raise ValueError("Nie znaleziono wiersza ze statystykami testów.")
-
-    tests = int(match.group(1))
-    successes = int(match.group(2))
-
-    if tests == 0:
-        return 0.0
-
-    return (successes / tests) * 100
-
-import re
+    # 1. Handling for JSON format (test_statistics.json)
+    if file_path.endswith(".json"):
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        # 'success_rate' in test_statistics.json is stored as a float between 0.0 and 1.0
+        if "success_rate" in data:
+            return float(data["success_rate"])
+        
+        raise ValueError("Key 'success_rate' not found in test statistics JSON file.")
+    raise ValueError("No success rate in given file (JSON).")
 
 def get_runs(file_path: str) -> int:
     with open(file_path, "r", encoding="utf-8") as f:
@@ -108,9 +111,21 @@ def append_text_to_file(file_path: str, text: str, ensure_newline: bool = True) 
         f.write(text)
 
 def get_latest_session(logs_root):
-    if not os.path.exists(logs_root): return None
-    session_dirs = [os.path.join(logs_root, d) for d in os.listdir(logs_root) if os.path.isdir(os.path.join(logs_root, d))]
-    return max(session_dirs, key=os.path.basename) if session_dirs else None
+    if not os.path.exists(logs_root):
+        return None
+
+    def parse_session_timestamp(dir_name):
+        try:
+            return datetime.strptime(dir_name, "%Y-%m-%d_%H-%M")
+        except ValueError:
+            return None
+
+    valid_sessions = []
+    for entry in os.scandir(logs_root):
+        if entry.is_dir() and parse_session_timestamp(entry.name):
+            valid_sessions.append(entry.path)
+
+    return max(valid_sessions, key=os.path.basename, default=None)
 
 def run_til_success(session_dir, runs, tests, time_limit = 2, min_success_rate = 0.5):
     sum_runs = 0
@@ -123,25 +138,26 @@ def run_til_success(session_dir, runs, tests, time_limit = 2, min_success_rate =
 
         session_dir = 'continue'
         stats_file_path = os.path.join(get_latest_session("logs"), "execution_statistics.txt")
+        tests_file_path = os.path.join(get_latest_session("logs"), "test_statistics.json")
         sum_runs += get_runs(stats_file_path)
-        if get_success_rate(stats_file_path) >= min_success_rate:
+        if get_success_rate(tests_file_path) >= min_success_rate:
             break
 
     duration = time.time() - start_time
     hours, remainder = divmod(int(duration), 3600)
     minutes, seconds = divmod(remainder, 60)
     duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    mssg = f"After {retries} attemps ({sum_runs} runs) program achieved success rate of {get_success_rate(stats_file_path):.2f}. Work time: {duration_str}\n"
+    mssg = f"After {retries} attemps ({sum_runs} runs) program achieved success rate of {get_success_rate(tests_file_path):.2f}. Work time: {duration_str}\n"
     append_text_to_file(stats_file_path, mssg)
 
 if __name__ == "__main__":
     ### Choose Parameters Here ###
     session_dir = 'continue'    # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
-    runs = 0                 # no. runs - either execution of plan or exploration - before test
-    tests = 100                 # how many times tries to go from start to finish from random spawn
-    time_limit = 4              # in hours, passing the limit breaks the loop
-    min_success_rate = 0.7      # % of successful tests to break the loop
+    runs = 1000                 # no. runs - either execution of plan or exploration - before test
+    tests = 10                  # how many times tries to go from an active skill to finish from random spawn
+    time_limit = 24             # in hours, passing the limit breaks the loop
+    min_success_rate = 0.9      # % of successful tests to break the loop early
 
-    #run_til_success(session_dir, runs, tests, time_limit, min_success_rate)
+    run_til_success(session_dir, runs, tests, time_limit, min_success_rate)
 
-    main(session_dir, runs, tests)
+    main("continue", 0, 1000) # extra tests

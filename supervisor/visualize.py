@@ -9,6 +9,7 @@ import math
 from communicator import Communicator
 import networkx as nx
 import textwrap
+from datetime import datetime
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -30,6 +31,25 @@ def lower_median(arr, axis=None):
             return np.nan
         k = (n - 1) // 2
         return np.take(np.sort(a, axis=axis), k, axis=axis)
+
+def get_session(logs_root, session_dir):
+    if not os.path.exists(logs_root):
+        return None
+    if session_dir is not None and os.path.exists(os.path.join(logs_root, session_dir)):
+        return os.path.join(logs_root, session_dir)
+
+    def parse_session_timestamp(dir_name):
+        try:
+            return datetime.strptime(dir_name, "%Y-%m-%d_%H-%M")
+        except ValueError:
+            return None
+
+    valid_sessions = []
+    for entry in os.scandir(logs_root):
+        if entry.is_dir() and parse_session_timestamp(entry.name):
+            valid_sessions.append(entry.path)
+
+    return max(valid_sessions, key=os.path.basename, default=None)
 
 # =============================================================================
 # SHARED RENDERERS & UTILS
@@ -369,6 +389,25 @@ class Renderer:
                     arrow_end = (int(P2[0]), int(P2[1]))
                     cv2.arrowedLine(img, arrow_start, arrow_end, edge_color, thickness, tipLength=0.4, line_type=cv2.LINE_AA)
 
+                # --- Edge weight label near the start on the convex side ---
+                t_label = 0.2  # Near the beginning of the edge
+                pt_label = (1 - t_label)**2 * P1 + 2 * (1 - t_label) * t_label * C + t_label**2 * P2
+
+                # Shift outward along the normal (same direction as curve control point C)
+                text_offset_dist = 14.0
+                label_pos = pt_label + np.array([nx_dir, ny_dir]) * text_offset_dist
+
+                label_text = f"{weight:.2f}" if isinstance(weight, float) else str(weight)
+                font_lbl = cv2.FONT_HERSHEY_SIMPLEX
+                scale_lbl = 0.38
+                thick_lbl = 1
+                (lbl_w, lbl_h), _ = cv2.getTextSize(label_text, font_lbl, scale_lbl, thick_lbl)
+
+                lbl_x = int(label_pos[0] - lbl_w / 2)
+                lbl_y = int(label_pos[1] + lbl_h / 2)
+
+                cv2.putText(img, label_text, (lbl_x, lbl_y), font_lbl, scale_lbl, self.TEXT_MAIN, thick_lbl, cv2.LINE_AA)
+
         for node, (x, y) in positions.items():
             cv2.circle(img, (x, y), node_radius, self.tertiary_color, -1)
             cv2.circle(img, (x, y), node_radius, self.primary_color, 2)
@@ -521,20 +560,8 @@ class PictureGenerator:
         self.session_dir = session_dir
         self.renderer = Renderer()
 
-    def get_latest_session(self):
-        if self.session_dir:
-            if os.path.isabs(self.session_dir) or os.path.exists(self.session_dir):
-                return self.session_dir
-            candidate = os.path.join(self.logs_root, self.session_dir)
-            if os.path.exists(candidate):
-                return candidate
-
-        if not os.path.exists(self.logs_root): return None
-        session_dirs = [os.path.join(self.logs_root, d) for d in os.listdir(self.logs_root) if os.path.isdir(os.path.join(self.logs_root, d))]
-        return max(session_dirs, key=os.path.basename) if session_dirs else None
-
     def get_pictures_dir(self):
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, self.session_dir)
         if not latest_session:
             return None
         out_dir = os.path.join(latest_session, "pictures")
@@ -591,7 +618,7 @@ class GNGPictureGenerator(PictureGenerator):
         return name.replace("_", " ").strip()
 
     def run(self):
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, self.session_dir)
         if not latest_session: return
         symbols_dir = os.path.join(latest_session, "PDDL", "GNG")
         if not os.path.exists(symbols_dir): return
@@ -683,7 +710,7 @@ class RepresentativePointPictureGenerator(PictureGenerator):
         return name.replace("_", " ").strip()
 
     def run(self):
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, self.session_dir)
         if not latest_session:
             return
 
@@ -738,7 +765,7 @@ class UpdateFrequencyPictureGenerator(PictureGenerator):
         self.bin_size_sec = bin_size_sec
 
     def _resolve_file_path(self):
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, self.session_dir)
         if latest_session:
             sess_path = os.path.join(latest_session, self.timestamp_file)
             if os.path.exists(sess_path):
@@ -770,7 +797,7 @@ class UpdateFrequencyPictureGenerator(PictureGenerator):
 
 class TransGraphPictureGenerator(PictureGenerator):
     def run(self):
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, self.session_dir)
         if not latest_session: return
         graphs_dir = os.path.join(latest_session, "graphs")
 
@@ -833,7 +860,7 @@ class UnifiedGNGPictureGenerator(PictureGenerator):
         return self.gng_colors[predicate_name]
 
     def run(self):
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, self.session_dir)
         if not latest_session: return
         symbols_dir = os.path.join(latest_session, "PDDL", "GNG")
         if not os.path.exists(symbols_dir): return
@@ -853,11 +880,11 @@ class UnifiedGNGPictureGenerator(PictureGenerator):
                 color = self._get_color(pred_name)
                 
                 nodes = data.get("nodes", [])
-                radiuses = data.get("local_radiuses", data.get("local_radii", []))
+                radii = data.get("local_radii", [])
                 
                 for i in range(len(nodes)):
                     node_id = f"{pred_name}_{i}"
-                    r_val = radiuses[i] if i < len(radiuses) else 0.0
+                    r_val = radii[i] if i < len(radii) else 0.0
                     G.add_node(node_id, radius=r_val)
                     node_colors[node_id] = color
 
@@ -888,6 +915,139 @@ class UnifiedGNGPictureGenerator(PictureGenerator):
         out_path = os.path.join(out_dir, f"unified_gng_plane_{self.pred_type}.png")
         cv2.imwrite(out_path, img)
         print(f"[PictureGenerator] Saved Unified GNG plane to {out_path}")
+
+class TestStatisticsPictureGenerator(PictureGenerator):
+    """Renders test statistics: success rate, plan lengths, execution times, and skill executions per step."""
+    
+    def __init__(self, logs_root="logs", session_dir=None, stats_file="test_statistics.json"):
+        super().__init__(logs_root, session_dir=session_dir)
+        self.stats_file = stats_file
+        self.success_color = (60, 180, 75)      # BGR Green
+        self.fail_color = (60, 60, 220)         # BGR Red
+
+    def run(self):
+        latest_session = get_session(self.logs_root, self.session_dir)
+        if not latest_session:
+            return
+
+        json_path = os.path.join(latest_session, self.stats_file)
+        if not os.path.exists(json_path):
+            print(f"[PictureGenerator] Test stats not found at {json_path}")
+            return
+
+        try:
+            with open(json_path, "r") as f:
+                data = json.load(f)
+
+            img = self.renderer.create_base_canvas("TEST SESSION PERFORMANCE", "Execution step breakdown & metrics")
+            
+            # 1. Summary Metrics Banner (Top Left)
+            sr = data.get("success_rate", 0.0) * 100.0
+            mean_pl = data.get("mean_plan_length", 0.0)
+            mode_pl = data.get("mode_plan_length", [])
+            mean_se = data.get("mean_steps_executed", 0.0)
+            mode_se = data.get("mode_steps_executed", [])
+            mean_dur = data.get("mean_execution_time_s", 0.0)
+            n_tests = data.get("total_tests", 0)
+
+            stats_lines = [
+                f"Tests: {n_tests} | Success Rate: {sr:.1f}%",
+                f"Plan Length -> Mean: {mean_pl:.2f} | Mode: {mode_pl}",
+                f"Steps Executed -> Mean: {mean_se:.2f} | Mode: {mode_se}",
+                f"Avg Execution Time: {mean_dur:.2f}s"
+            ]
+
+            box_x, box_y = 45, 100
+            for i, line in enumerate(stats_lines):
+                cv2.putText(img, line, (box_x, box_y + (i * 22)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.renderer.TEXT_MAIN, 1, cv2.LINE_AA)
+
+            # 2. Step vs Skill Stacked Bar Chart
+            step_graph_data = data.get("step_graph_data", {})
+            if not step_graph_data:
+                return
+
+            # Collect unique steps and skills
+            all_steps = set()
+            for sk, steps in step_graph_data.items():
+                all_steps.update(int(s) for s in steps.keys())
+
+            if not all_steps:
+                return
+
+            max_step = max(all_steps)
+            steps_range = list(range(max_step + 1))
+            skills = sorted(list(step_graph_data.keys()))
+
+            # Chart area setup
+            plot_x, plot_y = 45, 210
+            plot_w, plot_h = 910, 360
+            cv2.rectangle(img, (plot_x, plot_y), (plot_x + plot_w, plot_y + plot_h), self.renderer.PANEL_BORDER, 1)
+
+            # Find maximum total attempts on any single step
+            max_y_val = 1
+            for s in steps_range:
+                step_total = sum(step_graph_data.get(sk, {}).get(str(s), {}).get("total", 0) for sk in skills)
+                max_y_val = max(max_y_val, step_total)
+
+            # Draw Y Gridlines
+            grid_steps = 4
+            for i in range(grid_steps + 1):
+                y_val = plot_y + plot_h - int(i * (plot_h / grid_steps))
+                val_label = f"{int(i * (max_y_val / grid_steps))}"
+                cv2.line(img, (plot_x, y_val), (plot_x + plot_w, y_val), self.renderer.tertiary_color, 1, cv2.LINE_AA)
+                cv2.putText(img, val_label, (plot_x - 30, y_val + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.renderer.neutral_gray, 1, cv2.LINE_AA)
+
+            # Draw bars: grouped by step, divided by skill
+            step_width = plot_w / len(steps_range)
+            bar_slot_width = step_width * 0.8
+            bar_width = max(int(bar_slot_width / max(len(skills), 1)), 3)
+
+            for s_idx, s in enumerate(steps_range):
+                step_base_x = plot_x + int(s_idx * step_width) + int(step_width * 0.1)
+                
+                # Step X-axis label
+                cv2.putText(img, f"Step {s}", (step_base_x + int(bar_slot_width / 2) - 18, plot_y + plot_h + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.renderer.TEXT_MAIN, 1, cv2.LINE_AA)
+
+                for k_idx, sk in enumerate(skills):
+                    sk_step_info = step_graph_data.get(sk, {}).get(str(s), {"succeed": 0, "fail": 0, "total": 0})
+                    n_succ = sk_step_info.get("succeed", 0)
+                    n_fail = sk_step_info.get("fail", 0)
+
+                    if n_succ == 0 and n_fail == 0:
+                        continue
+
+                    bx = step_base_x + (k_idx * bar_width)
+                    h_succ = int((n_succ / max_y_val) * (plot_h - 20))
+                    h_fail = int((n_fail / max_y_val) * (plot_h - 20))
+
+                    # Draw successful (green) segment
+                    if h_succ > 0:
+                        by_succ = plot_y + plot_h - h_succ
+                        cv2.rectangle(img, (bx, by_succ), (bx + bar_width - 1, plot_y + plot_h), self.success_color, -1)
+
+                    # Draw failed (red) segment stacked above
+                    if h_fail > 0:
+                        by_fail = plot_y + plot_h - h_succ - h_fail
+                        cv2.rectangle(img, (bx, by_fail), (bx + bar_width - 1, plot_y + plot_h - h_succ), self.fail_color, -1)
+
+            # 3. Legend (Top Right)
+            cv2.rectangle(img, (740, 95), (752, 107), self.success_color, -1)
+            cv2.putText(img, "Succeeded", (760, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.renderer.TEXT_MAIN, 1, cv2.LINE_AA)
+            cv2.rectangle(img, (740, 115), (752, 127), self.fail_color, -1)
+            cv2.putText(img, "Failed", (760, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.renderer.TEXT_MAIN, 1, cv2.LINE_AA)
+
+            out_dir = self.get_pictures_dir()
+            if not out_dir:
+                return
+            out_path = os.path.join(out_dir, "test_statistics.png")
+            cv2.imwrite(out_path, img)
+            print(f"[PictureGenerator] Saved test statistics graph to {out_path}")
+
+        except Exception as e:
+            print(f"[PictureGenerator] Failed to generate test statistics picture: {e}")
             
 class PipelinePictureGenerator(PictureGenerator):
     def __init__(self, logs_root="logs", session_dir=None):
@@ -899,7 +1059,8 @@ class PipelinePictureGenerator(PictureGenerator):
             UnifiedGNGPictureGenerator(logs_root, 'eff', session_dir=session_dir),
             UnifiedGNGPictureGenerator(logs_root, 'pass', session_dir=session_dir),
             UpdateFrequencyPictureGenerator(logs_root, session_dir=session_dir),
-            RepresentativePointPictureGenerator(logs_root, session_dir=session_dir)
+            RepresentativePointPictureGenerator(logs_root, session_dir=session_dir),
+            TestStatisticsPictureGenerator(logs_root, session_dir=session_dir)
         ]
 
     def run(self):
@@ -970,11 +1131,6 @@ class LiveUpdateFrequencyMonitor(Renderer):
         self.window_name = "Live Update Frequency Monitor"
         self._window_created = False
 
-    def get_latest_session(self):
-        if not os.path.exists(self.logs_root): return None
-        session_dirs = [os.path.join(self.logs_root, d) for d in os.listdir(self.logs_root) if os.path.isdir(os.path.join(self.logs_root, d))]
-        return max(session_dirs, key=os.path.basename) if session_dirs else None
-
     def _ensure_window(self):
         if not self._window_created:
             cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
@@ -986,7 +1142,7 @@ class LiveUpdateFrequencyMonitor(Renderer):
         self._ensure_window()
         cv2.waitKey(1)
 
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, None)
         if not latest_session: return
 
         times_path = os.path.join(latest_session, "graphs", self.timestamp_filename)
@@ -1023,11 +1179,6 @@ class LiveGraphMonitor(Renderer):
         self.trans_window = "Live Transition Graph"
         self._window_created = False
 
-    def get_latest_session(self):
-        if not os.path.exists(self.logs_root): return None
-        session_dirs = [os.path.join(self.logs_root, d) for d in os.listdir(self.logs_root) if os.path.isdir(os.path.join(self.logs_root, d))]
-        return max(session_dirs, key=os.path.basename) if session_dirs else None
-
     def _ensure_window(self):
         if not self._window_created:
             cv2.namedWindow(self.trans_window, cv2.WINDOW_AUTOSIZE)
@@ -1039,7 +1190,7 @@ class LiveGraphMonitor(Renderer):
         self._ensure_window()
         cv2.waitKey(1)
 
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, None)
         if not latest_session: return
 
         trans_path = os.path.join(latest_session, "graphs", self.trans_filename)
@@ -1105,16 +1256,6 @@ class LiveGNGMonitor(Renderer):
             name += ' - Transition'
         return name.replace("_", " ").strip()
 
-    def get_latest_session(self):
-        if not os.path.exists(self.logs_root):
-            return None
-        session_dirs = [
-            os.path.join(self.logs_root, d)
-            for d in os.listdir(self.logs_root)
-            if os.path.isdir(os.path.join(self.logs_root, d))
-        ]
-        return max(session_dirs, key=os.path.basename) if session_dirs else None
-
     def _ensure_window(self):
         if not self._window_created:
             cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
@@ -1141,7 +1282,7 @@ class LiveGNGMonitor(Renderer):
         self._ensure_window()
         cv2.waitKey(1)
 
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, None)
         if not latest_session:
             return
 
@@ -1179,11 +1320,11 @@ class LiveGNGMonitor(Renderer):
             color = self._get_color(display_name)
 
             nodes = data.get("nodes", [])
-            radiuses = data.get("local_radiuses", data.get("local_radii", []))
+            radii = data.get("local_radii", [])
 
             for i in range(len(nodes)):
                 node_id = f"{display_name}_{i}"
-                r_val = radiuses[i] if i < len(radiuses) else 0.0
+                r_val = radii[i] if i < len(radii) else 0.0
                 G.add_node(node_id, radius=r_val)
                 node_colors[node_id] = color
 
@@ -1216,15 +1357,6 @@ class LiveRepresentativePointMonitor(Renderer):
         self.window_name = "Live Representative Point Monitor"
         self._window_created = False
 
-    def get_latest_session(self):
-        if not os.path.exists(self.logs_root):
-            return None
-        session_dirs = [
-            os.path.join(self.logs_root, d)
-            for d in os.listdir(self.logs_root)
-            if os.path.isdir(os.path.join(self.logs_root, d))
-        ]
-        return max(session_dirs, key=os.path.basename) if session_dirs else None
 
     def _ensure_window(self):
         if not self._window_created:
@@ -1253,7 +1385,7 @@ class LiveRepresentativePointMonitor(Renderer):
         if not action_name:
             return
 
-        latest_session = self.get_latest_session()
+        latest_session = get_session(self.logs_root, None)
         if not latest_session:
             return
 
@@ -1296,5 +1428,6 @@ class LiveRepresentativePointMonitor(Renderer):
             self._window_created = False
 
 if __name__ == "__main__":
-    gen = PipelinePictureGenerator()
+    sd = "offline" # or None for newest one
+    gen = PipelinePictureGenerator(session_dir=sd)
     gen.run()

@@ -24,9 +24,13 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="additional_scripts\brain_viewer.py" />
+    <Compile Include="additional_scripts\exec_stats.py" />
     <Compile Include="additional_scripts\notes.py" />
     <Compile Include="additional_scripts\2D_predicate.py" />
+    <Compile Include="additional_scripts\optimize_hyperparams.py" />
     <Compile Include="additional_scripts\parameter_finder.py" />
+    <Compile Include="additional_scripts\rebuild_brain_gng.py" />
+    <Compile Include="additional_scripts\tune_hypers.py" />
     <Compile Include="agent\predicate.py" />
     <Compile Include="supervisor\visualize.py" />
     <Compile Include="agent\core.py" />

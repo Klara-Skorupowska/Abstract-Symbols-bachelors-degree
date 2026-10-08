@@ -1,13 +1,16 @@
 import numpy as np
 
 class Predicate:
-    def __init__(self, max_points, base_radius=0.1, max_radius=1.0, 
+    def __init__(self, max_points, dim=None, base_radius=0.1, max_radius=1.0, 
                  learning_rate_b=0.2, learning_rate_n=0.006, 
                  max_edge_age=50, lambda_step=10, alpha=0.5, d=0.995):
         
+        self.dim = int(dim) if dim is not None else None
+
         self.max_points = max_points
         self.base_radius = base_radius    
         self.max_radius = max_radius      
+        self.radii_factor = 0.5
         
         self.eb = learning_rate_b
         self.en = learning_rate_n
@@ -20,6 +23,7 @@ class Predicate:
         self.errors = []
         self.edges = {}
         self.adj = {}
+        self.cached_radii = None
 
         self.update_count = 0
 
@@ -38,33 +42,36 @@ class Predicate:
             self.adj[v].remove(u)
         
     def _get_local_radius(self, node_idx):
-        """Computes the local radius based on neighbors using classic Euclidean distance."""
+        if self.cached_radii is not None and node_idx < len(self.cached_radii):
+            return self.cached_radii[node_idx]
         neighbors = self.adj.get(node_idx, set())
+        nodes_mat = np.asarray(self.nodes)
+        norm_factor = np.sqrt(self.dim) if (self.dim and self.dim > 0) else 1.0
+        
         if not neighbors:
+            # Fall back to base radius if there are no topological neighbors
             return self.base_radius
             
-        nodes_mat = np.asarray(self.nodes)
         ref_node = nodes_mat[node_idx]
-        
-        dists = [np.linalg.norm(ref_node - nodes_mat[n]) for n in neighbors]
-        
-        raw_radius = 0.5 * min(dists)
+        dists = [np.linalg.norm(ref_node - nodes_mat[n]) / norm_factor for n in neighbors]
+        raw_radius = min(dists) * self.radii_factor
         return float(np.clip(raw_radius, self.base_radius, self.max_radius))
 
     def is_active(self, vector):
         if not self.nodes:
             return False
-        
+        self.dim = len(vector)
         vec = np.asarray(vector, dtype=float)
         nodes_mat = np.asarray(self.nodes, dtype=float)
 
         if vec.shape[-1] != nodes_mat.shape[-1]:
             raise ValueError(f"Vector dimension {vec.shape[-1]} does not match node dimension {nodes_mat.shape[-1]}.")
         
-        dists = np.linalg.norm(nodes_mat - vec, axis=1)
+        dists = np.linalg.norm(nodes_mat - vec, axis=1) / np.sqrt(self.dim)
         
         n1_idx = int(np.argmin(dists))
         n1_dist = dists[n1_idx]
+
     
         local_radius = self._get_local_radius(n1_idx)
         return bool(n1_dist <= local_radius)
@@ -128,6 +135,10 @@ class Predicate:
 
     def update(self, vector, valence: bool = True):
         vector = np.array(vector, dtype=float)
+        if self.dim is None:
+            self.dim = len(vector)
+        elif len(vector) != self.dim:
+            raise ValueError(f"Vector dimension {len(vector)} does not match predicate dim {self.dim}.")
         
         if len(self.nodes) < 2:
             if valence:
