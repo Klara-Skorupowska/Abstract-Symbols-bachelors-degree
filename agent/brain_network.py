@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import numpy as np
@@ -8,92 +9,23 @@ from .predicate import Predicate
 class BrainNetwork:
     def __init__(self, log_dir=None):
         self.state_dim = None 
+        # Flat dictionary mapping skill_name -> {"precondition": Predicate, "effect": Predicate}
+        self.skills = {}
 
-        class Node:
-            def __init__(self, name: str, precondition: Predicate, effect: Predicate):
-                self.name = name
-                self.precondition = precondition
-                self.effect = effect
-            
-            def __repr__(self):
-                return f"Node({self.name})"
+        ### HYPERPARAMETERS ###
+        self.min_overlap_ratio_HARD = 0.75 # for only actiive overlap
+        self.min_overlap_ratio_SOFT = 0.75 # for active and unknown and coflicted
 
-        class Edge:
-            def __init__(self, source_node: str, target_node: str, weight: float):
-                self.source_node = source_node
-                self.target_node = target_node
-                self.symbol = None
-                self.weight = weight
-
-            def __repr__(self):
-                return f"Edge({self.source_node} -> {self.target_node}, weight={self.weight})"
-            
-            def update(self, symbol: Predicate, weight: float):
-                self.symbol = symbol
-                self.weight = weight
-
-        class Graph:
-            def __init__(self):
-                self.nodes = {}
-                self.edges_by_target = {}
-
-            def add_node(self, name: str, precondition: Predicate, effect: Predicate):
-                if name in self.nodes:
-                    raise ValueError(f"Node '{name}' already exists.")
-                self.nodes[name] = Node(name, precondition, effect)
-                if name not in self.edges_by_target:
-                    self.edges_by_target[name] = {}
-
-            def add_edge(self, from_name: str, to_name: str, overlap: float):
-                if from_name is None or to_name is None:
-                    return
-                if from_name not in self.nodes or to_name not in self.nodes:
-                    raise KeyError(f"Both nodes must exist: {from_name}, {to_name}")
-
-                incoming = self.edges_by_target.setdefault(to_name, {})
-                if from_name in incoming:
-                    incoming[from_name].weight = overlap
-                else:
-                    incoming[from_name] = Edge(from_name, to_name, overlap)
-
-            def delete_edge(self, from_name: str, to_name: str):
-                incoming = self.edges_by_target.get(to_name)
-                if not incoming or from_name not in incoming:
-                    return
-                del incoming[from_name]
-
-            def get_incoming_edges(self, target_name: str) -> dict:
-                return self.edges_by_target.get(target_name, {})
-
-            def get_node(self, name: str):
-                return self.nodes.get(name)
-
-            def get_nodes_list(self):
-                return list(self.nodes.keys())
-
-            def update_precondition(self, node_name: str, vector, valence: bool):
-                if node_name not in self.nodes:
-                    raise KeyError(f"Node '{node_name}' does not exist.")
-                self.nodes[node_name].precondition.update(vector, valence)
-
-            def update_effect(self, node_name: str, vector, valence: bool):
-                if node_name not in self.nodes:
-                    raise KeyError(f"Node '{node_name}' does not exist.")
-                if valence:
-                    self.nodes[node_name].effect.update(vector, True)
-
-        self.trans_graph = Graph()
-        self.min_overlap_ratio = 0.7
-
-        self.max_points = 85
-        self.base_radius = 0.15
-        self.max_radius = 1.75 
+        self.max_points = 10
+        self.base_radius = 0.1
+        self.max_radius = 8 
         self.learning_rate_b = 0.2
         self.learning_rate_n = 0.01
-        self.max_edge_age = 24
+        self.max_edge_age = 15
         self.lambda_step = 5
         self.alpha = 0.7
         self.d = 0.99
+        ### --------------- ###
 
         self.log_dir = log_dir
         if self.log_dir:
@@ -105,281 +37,394 @@ class BrainNetwork:
             os.makedirs(self.graphs_dir, exist_ok=True)
 
     def add_node(self, skill_name: str, precondition: Predicate, effect: Predicate):
-        self.trans_graph.add_node(skill_name, precondition, effect)
+        self.skills[skill_name] = {
+            "precondition": precondition,
+            "effect": effect
+        }
             
-    def create_node(self, skill_name):
-        if skill_name not in self.trans_graph.nodes:
-            precondition = Predicate(self.max_points, self.state_dim, self.base_radius, self.max_radius, 
-                                     self.learning_rate_b, self.learning_rate_n, self.max_edge_age, 
-                                     self.lambda_step, self.alpha, self.d)
-            effect = Predicate(self.max_points, self.state_dim, self.base_radius, self.max_radius, 
-                               self.learning_rate_b, self.learning_rate_n, self.max_edge_age, 
-                               self.lambda_step, self.alpha, self.d)
-            self.trans_graph.add_node(skill_name, precondition, effect)
+    def create_node(self, skill_name: str):
+        if skill_name not in self.skills:
+            precondition = Predicate(
+                self.max_points, self.state_dim, self.base_radius, self.max_radius, 
+                self.learning_rate_b, self.learning_rate_n, self.max_edge_age, 
+                self.lambda_step, self.alpha, self.d
+            )
+            effect = Predicate(
+                self.max_points, self.state_dim, self.base_radius, self.max_radius, 
+                self.learning_rate_b, self.learning_rate_n, self.max_edge_age, 
+                self.lambda_step, self.alpha, self.d
+            )
+            self.add_node(skill_name, precondition, effect)
 
-    def delete_edge(self, from_name: str, to_name: str):
-        self.trans_graph.delete_edge(from_name, to_name)
-        if self.log_dir:
-            symbol_name = f"sym_{from_name}_enables_{to_name}_pass"
-            file_path = os.path.join(self.gas_dir, f"{symbol_name}.json")
-            temp_file = os.path.join(self.gas_dir, f"{symbol_name}.tmp")
-            for path in (file_path, temp_file):
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
+    def prepare_nodes(self, skillset):
+        for skill_name in skillset:
+            self.create_node(skill_name)
 
-    def preconditions_met(self, skill_name, state_vector) -> bool:
-        if self.state_dim is None:
-            self.state_dim = len(state_vector)
+    def preconditions_status(self, skill_name: str, state_vector) -> str:
+        """Returns 'TRUE', 'FALSE', or 'UNKNOWN' for the skill's precondition."""
+        if skill_name not in self.skills:
+            return "UNKNOWN"
+        return self.skills[skill_name]["precondition"].evaluate(state_vector)
 
-        if skill_name not in self.trans_graph.nodes:
-            return False
-            
-        node = self.trans_graph.nodes[skill_name]
-        return node.precondition.is_active(state_vector)
+    def preconditions_met(self, skill_name: str, state_vector) -> bool:
+        """Execution check: Only execute in plans if positive is active and negative is inactive."""
+        return self.preconditions_status(skill_name, state_vector) == "TRUE"
 
-    def get_active_skills(self, vector):
+    def get_unknown_skills(self, state_vector) -> list:
+        """Returns skills where neither positive nor negative GNG is active."""
+        unknown_skills = []
+        for name, predicates in self.skills.items():
+            if predicates["precondition"].is_unknown(state_vector):
+                unknown_skills.append(name)
+        return unknown_skills
+
+    def get_active_skills(self, vector) -> list:
+        """Returns skills with active positive preconditions."""
         if self.state_dim is None:
             self.state_dim = len(vector)
 
         active_skills = []
-        for name, node in self.trans_graph.nodes.items():
-            if node.precondition.is_active(vector):
+        for name, predicates in self.skills.items():
+            if predicates["precondition"].is_active(vector):
                 active_skills.append(name)
         return active_skills
 
-    def get_nodes(self):
-        return self.trans_graph.get_nodes_list()
+    def get_nodes(self) -> list:
+        return list(self.skills.keys())
 
     def update(self, buffor):
-        print(f"\t[Brain] Updating Predicates (GNG)")
+        print("\t[Brain] Updating Predicates (GNG)")
         for data in buffor:
             pre_vector_state, skill_name, post_vector_state, succeed = data
         
             if self.state_dim is None:
                 self.state_dim = len(pre_vector_state)
 
-            if skill_name not in self.trans_graph.nodes:
+            if skill_name not in self.skills:
                 self.create_node(skill_name)
 
-            self.trans_graph.update_precondition(skill_name, pre_vector_state, succeed)
-            self.trans_graph.update_effect(skill_name, post_vector_state, succeed)
-
-            # 1. Update outgoing transitions from skill_name
-            self.update_transitions(skill_name)
-            
-            # 2. Update incoming transitions to skill_name (preconditions have changed)
-            incoming_sources = list(self.trans_graph.get_incoming_edges(skill_name).keys())
-            for src_skill in incoming_sources:
-                self.update_transitions(src_skill)
+            self.skills[skill_name]["precondition"].update(pre_vector_state, succeed)
+            if succeed:
+                self.skills[skill_name]["effect"].update(post_vector_state, True)
 
         self._logger()
+
+    def calculate_overlap(self, preceeding: str, following: str, mode='HARD'):
+        if preceeding == following: 
+            return None, None
             
-    def update_transitions(self, skill_name: str, min_overlap_ratio = None):
-        # if we can do A -> B, where A = skill_name, B = all others
-        if min_overlap_ratio is None:
-            min_overlap_ratio = self.min_overlap_ratio
-        
-        src_node = self.trans_graph.nodes[skill_name] # skill_name is the A
-        eff_gng = src_node.effect
-        
-        existing_targets = [
-            target_name 
-            for target_name, sources in self.trans_graph.edges_by_target.items() 
-            if skill_name in sources
-        ]
+        src_skill = self.skills.get(preceeding)
+        tgt_skill = self.skills.get(following)
+        if not src_skill or not tgt_skill:
+            return None, None
 
+        eff_gng = src_skill["effect"]
         if not eff_gng.nodes or len(eff_gng.nodes) < 1:
-            for target_skill in existing_targets:
-                self.delete_edge(skill_name, target_skill) # delete all if there is no effect
-            return {}
+            return None, None
+            
+        init_gng = tgt_skill["precondition"]
+        if not init_gng.nodes or len(init_gng.nodes) < 1:
+            return None, None
 
-        overlapping_points_map = {}
-
-        for target_skill, target_node in self.trans_graph.nodes.items(): # all others
-            if skill_name == target_skill: 
-                continue # no self loops
-
-            init_gng = target_node.precondition
-            if not init_gng.nodes or len(init_gng.nodes) < 1:
-                if target_skill in existing_targets:
-                    self.delete_edge(skill_name, target_skill) # delete this one if there is no init
-                continue
-
-            # Check activation directly
+        # Check overlap: soft = not forbidden, hard = active
+        if mode == 'SOFT':
             overlapping_points = [
                 node for node in eff_gng.nodes 
-                if init_gng.is_active(node) # add if we can start target skill (init is active)
+                if not init_gng.is_forbidden(node)
             ]
-            overlap_ratio = len(overlapping_points) / len(eff_gng.nodes)
-            
-            # Require minimum threshold and count to reject noise
-            if overlap_ratio >= min_overlap_ratio and len(overlapping_points) >= 1:
-                self.trans_graph.add_edge(skill_name, target_skill, overlap_ratio) # add if the overlap is good enough
-                overlapping_points_map[target_skill] = overlapping_points
-            else:
-                if target_skill in existing_targets:
-                    self.delete_edge(skill_name, target_skill) # delete if it is no longer good
+        elif mode == 'HARD':
+            overlapping_points = [
+                node for node in eff_gng.nodes 
+                if init_gng.is_acceptable(node)
+            ]
+        else:
+            raise ValueError(f"mode should be SOFT or HARD, not {mode}")
 
-        return overlapping_points_map
+        overlap_ratio = len(overlapping_points) / len(eff_gng.nodes)
 
-    def abstract_symbols(self): # I guesse it is unnecessary
-        # Compute filtered transitions
-        all_overlaps = {
-            src_skill: self.update_transitions(src_skill)
-            for src_skill in self.trans_graph.nodes.keys()
+        sym_pred = Predicate(
+            max_points=max(self.max_points, len(overlapping_points)),
+            dim=self.state_dim,
+            base_radius=self.base_radius,
+            max_radius=self.max_radius,
+            learning_rate_b=self.learning_rate_b,
+            learning_rate_n=self.learning_rate_n,
+            max_edge_age=self.max_edge_age,
+            lambda_step=1,
+            alpha=self.alpha, 
+            d=self.d
+        )
+        for pt in overlapping_points:
+            sym_pred.update(pt, valence=True)
+
+        return overlap_ratio, sym_pred
+
+    def compute_transitions(self, min_overlap_ratio=None, mode='HARD') -> list:
+        """
+        Dynamically computes valid transitions and transition symbols on the fly.
+        Returns a list of dicts: [{'source': str, 'target': str, 'weight': float, 'symbol': Predicate}]
+        """
+        if min_overlap_ratio is None:
+            if mode == 'HARD':
+                min_overlap_ratio = self.min_overlap_ratio_HARD
+            if mode == 'SOFT':
+                min_overlap_ratio = self.min_overlap_ratio_SOFT
+
+
+        transitions = []
+        skills_list = list(self.skills.keys())
+
+        for src in skills_list:
+            for tgt in skills_list:
+                if src == tgt:
+                    continue
+                ratio, sym_pred = self.calculate_overlap(src, tgt, mode)
+                if ratio is not None and ratio >= min_overlap_ratio:
+                    transitions.append({
+                        "source": src,
+                        "target": tgt,
+                        "weight": ratio,
+                        "symbol": sym_pred
+                    })
+        return transitions
+
+    def export_transition_graph_json(self, file_path=None, mode='HARD') -> dict:
+        """
+        Generates and optionally saves transition graph JSON for visualization.
+        """
+        transitions = self.compute_transitions(mode=mode)
+        edges_list = []
+
+        for edge in transitions:
+            symbol_name = f"sym_{edge['source']}_enables_{edge['target']}"
+            edges_list.append({
+                "source": edge["source"],
+                "target": edge["target"],
+                "symbol_name": symbol_name,
+                "weight": edge["weight"]
+            })
+
+        graph_data = {
+            "nodes": list(self.skills.keys()),
+            "edges": edges_list
         }
 
-        # Create transition symbols only for verified overlapping nodes
-        for target_skill, sources in list(self.trans_graph.edges_by_target.items()):
-            for src_skill, edge in list(sources.items()):
-                overlapping_points = all_overlaps.get(src_skill, {}).get(target_skill, [])
-                if not overlapping_points:
-                    self.delete_edge(src_skill, target_skill)
-                    continue
+        if file_path:
+            os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+            temp_file = f"{file_path}.tmp"
+            with open(temp_file, "w") as f:
+                json.dump(graph_data, f, indent=4)
+            for _ in range(5):
+                try:
+                    os.replace(temp_file, file_path)
+                    break
+                except (PermissionError, OSError):
+                    time.sleep(0.05)
+            else:
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except OSError:
+                        pass
 
-                init_gng = self.trans_graph.nodes[target_skill].precondition
-                sym_pred = Predicate(
-                    max_points=max(self.max_points, len(overlapping_points)),
-                    base_radius=init_gng.base_radius,
-                    max_radius=init_gng.max_radius,
-                    learning_rate_b=self.learning_rate_b,
-                    learning_rate_n=self.learning_rate_n
-                )
-                for pt in overlapping_points:
-                    sym_pred.update(pt, valence=True)
+        return graph_data
 
-                edge.symbol = sym_pred
-
-    def generate_domain_pddl(self, domain_name="robot_domain") -> str:
+    def generate_domain_pddl(self, domain_name="robot_domain", mode='HARD') -> str:
+        """Generates a STRIPS PDDL domain adhering strictly to Pyperplan syntax rules."""
         pddl = [
             f"(define (domain {domain_name})",
             "  (:requirements :strips)",
             "  (:predicates"
         ]
-        
-        for skill in self.trans_graph.nodes.keys():
-            pddl.append(f"    (can_run_{skill})")
-            pddl.append(f"    (executed_{skill})")
-            
+
+        def format_symbol_name(src: str, tgt: str) -> str:
+            return f"sym_{src.lower()}_to_{tgt.lower()}"
+
+        transitions = self.compute_transitions(mode=mode)
+
+        # 1. Collect all declared predicates
+        predicates = set()
+        for skill in self.skills.keys():
+            predicates.add(f"pre_{skill.lower()}")
+            predicates.add(f"goal_reached_{skill.lower()}")
+
+        for trans in transitions:
+            predicates.add(format_symbol_name(trans["source"], trans["target"]))
+
+        for pred in sorted(predicates):
+            pddl.append(f"    ({pred})")
         pddl.append("  )")
 
-        # Compute max/average outgoing transition weight for sorting source nodes
-        def get_source_priority(src_name):
-            weights = []
-            for target_name, sources in self.trans_graph.edges_by_target.items():
-                if src_name in sources:
-                    edge = sources[src_name]
-                    w = edge.weight if edge.weight is not None else 0.0
-                    weights.append(w)
-            return max(weights) if weights else 0.0
+        def format_effect(adds, deletes):
+            effects = [f"({a})" for a in adds]
+            effects.extend([f"(not ({d}))" for d in deletes])
+            if len(effects) == 1:
+                return effects[0]
+            return f"(and {' '.join(effects)})"
 
-        # Sort source skills so highest-overlap branches appear first
-        sorted_sources = sorted(
-            self.trans_graph.nodes.keys(),
-            key=get_source_priority,
-            reverse=True
-        )
+        # 2. Build actions
+        for skill_name in sorted(self.skills.keys()):
+            sk_lower = skill_name.lower()
 
-        for src_name in sorted_sources:
-            targets = [
-                target
-                for target, sources in self.trans_graph.edges_by_target.items()
-                if src_name in sources
+            incoming = [
+                format_symbol_name(trans["source"], skill_name)
+                for trans in transitions if trans["target"] == skill_name
             ]
 
-            # Sort target transitions by weight descending (highest overlap first)
-            targets.sort(
-                key=lambda t: (
-                    self.trans_graph.edges_by_target[t][src_name].weight
-                    if self.trans_graph.edges_by_target[t][src_name].weight is not None
-                    else 0.0
-                ),
-                reverse=True
-            )
+            outgoing = [
+                format_symbol_name(skill_name, trans["target"])
+                for trans in transitions if trans["source"] == skill_name
+            ]
 
+            # Action 1: Starting from initial precondition
+            adds_init = [f"goal_reached_{sk_lower}"] + outgoing
+            dels_init = [f"pre_{sk_lower}"]
             pddl.extend([
                 "",
-                f"  (:action {src_name}",
+                f"  (:action {sk_lower}_from_init",
                 "    :parameters ()",
-                f"    :precondition (can_run_{src_name})",
+                f"    :precondition (and (pre_{sk_lower}))",
+                f"    :effect {format_effect(adds_init, dels_init)}",
+                "  )"
             ])
 
-            adds = [f"(executed_{src_name})"]
-            for target in targets:
-                adds.append(f"(can_run_{target})")
-
-            deletes = [f"(can_run_{src_name})"]
-            pddl.append(f"    :effect (and {' '.join(adds)} (not {' '.join(deletes)}))")
-            pddl.append("  )")
+            # Action 2: Triggered by learned transition symbols
+            for in_sym in incoming:
+                adds_via = [f"goal_reached_{sk_lower}"] + outgoing
+                dels_via = [in_sym]
+                pddl.extend([
+                    "",
+                    f"  (:action {sk_lower}_via_{in_sym}",
+                    "    :parameters ()",
+                    f"    :precondition (and ({in_sym}))",
+                    f"    :effect {format_effect(adds_via, dels_via)}",
+                    "  )"
+                ])
 
         pddl.append(")")
         return "\n".join(pddl)
 
-    def generate_problem_pddl(self, initial_skill, goal_skill, 
-                              problem_name="plan_problem", domain_name="robot_domain") -> str:
+    def generate_problem_pddl(self, current_vector, goal_skill, start_skill=None, 
+                          problem_name="plan_problem", domain_name="robot_domain", mode='HARD') -> str:
+        init_predicates = []
+
+        if start_skill:
+            # Enforce planning starting strictly from the designated skill
+            init_predicates.append(f"(pre_{start_skill.lower()})")
+        else:
+            # Fallback: direct preconditions in s_0
+            for name, predicates in self.skills.items():
+                if predicates["precondition"] and self.preconditions_met(name, current_vector):
+                    init_predicates.append(f"(pre_{name.lower()})")
+
+        # Only include active transition symbols if not enforcing a strict starting skill
+        if not start_skill:
+            transitions = self.compute_transitions(mode=mode)
+            for trans in transitions:
+                if trans["symbol"] is not None and trans["symbol"].is_active(current_vector):
+                    init_predicates.append(f"(sym_{trans['source'].lower()}_to_{trans['target'].lower()})")
+
         pddl = [
             f"(define (problem {problem_name})",
             f"  (:domain {domain_name})",
-            "  (:init",
-            f"    (can_run_{initial_skill})",
+            "  (:init"
+        ]
+        for pred in sorted(set(init_predicates)):
+            pddl.append(f"    {pred}")
+        pddl.extend([
             "  )",
             "  (:goal",
-            f"    (executed_{goal_skill})",
+            f"    (goal_reached_{goal_skill.lower()})",
             "  )",
             ")"
-        ]
+        ])
         return "\n".join(pddl)
 
     def _logger(self):
         if not self.log_dir:
             return
 
-        for skill in self.trans_graph.nodes.keys():
-            self.update_transitions(skill)
-        self.abstract_symbols()
+        # 1. Save all skill predicates
+        for skill_name, predicates in self.skills.items():
+            self.save_predicate(skill_name, predicates["precondition"], 'init')
+            self.save_predicate(skill_name, predicates["effect"], 'eff')
 
-        for skill, node in self.trans_graph.nodes.items():
-            self.save_predicate(skill, node.precondition, 'init')
-            self.save_predicate(skill, node.effect, 'eff')
-
-        edges_list = []
-        for target, sources in self.trans_graph.edges_by_target.items():
-            for source, edge in sources.items():
-                symbol_name = ""
-                if edge.symbol is not None:
-                    symbol_name = f"sym_{source}_enables_{target}"
-                    self.save_predicate(symbol_name, edge.symbol, 'pass')
-                edges_list.append({
-                    "source": edge.source_node,
-                    "target": edge.target_node,
-                    "symbol_name": symbol_name,
-                    "weight": edge.weight, 
-                })
-
-        graph_data = {
-            "nodes": list(self.trans_graph.nodes.keys()),
-            "edges": edges_list
-        }
-            
-        file_path = os.path.join(self.graphs_dir, "trans_graph.json")
-        temp_file = os.path.join(self.graphs_dir, "trans_graph.tmp")
-        with open(temp_file, "w") as f:
-            json.dump(graph_data, f)
-        for _ in range(5):
-            try:
-                os.replace(temp_file, file_path)
-                break
-            except (PermissionError, OSError):
-                time.sleep(0.05)
-        else:
-            if os.path.exists(temp_file):
+        # 2. Clean old pass symbols if present
+        for f in os.listdir(self.gas_dir):
+            if f.endswith("_pass.json"):
                 try:
-                    os.remove(temp_file)
+                    os.remove(os.path.join(self.gas_dir, f))
                 except OSError:
                     pass
+
+        # 3. Compute transitions on the fly and save active transition pass predicates
+        transitions = self.compute_transitions()
+        for edge in transitions:
+            symbol_name = f"sym_{edge['source']}_enables_{edge['target']}"
+            self.save_predicate(symbol_name, edge["symbol"], 'pass')
+
+        # 4. Generate and save trans_graph.json
+        for mode in ('HARD', 'SOFT'):
+            file_path = os.path.join(self.graphs_dir, f"trans_graph_{mode}.json")
+            self.export_transition_graph_json(file_path=file_path, mode=mode)
+
+    @staticmethod
+    def _serialize_single_gng(gng_obj) -> dict:
+        parameters = {
+            "max_points": gng_obj.max_points,
+            "base_radius": gng_obj.base_radius,
+            "max_radius": gng_obj.max_radius,
+            "learning_rate_b": gng_obj.eb,
+            "learning_rate_n": gng_obj.en,
+            "max_edge_age": gng_obj.max_age,
+            "lambda_step": gng_obj.lambda_step,
+            "alpha": gng_obj.alpha,
+            "d": gng_obj.d,
+        }
+        edges_str_keys = {f"{u},{v}": age for (u, v), age in gng_obj.edges.items()}
+        radii = [float(gng_obj._get_local_radius(i)) for i in range(len(gng_obj.nodes))]
+
+        return {
+            "parameters": parameters,
+            "nodes": [n.tolist() for n in gng_obj.nodes],
+            "edges": edges_str_keys,
+            "local_radii": radii
+        }
+
+    @staticmethod
+    def _deserialize_single_gng(gng_obj, data: dict):
+        if not data:
+            return
+
+        params = data.get("parameters", {})
+        gng_obj.max_points = params.get("max_points", gng_obj.max_points)
+        gng_obj.base_radius = params.get("base_radius", gng_obj.base_radius)
+        gng_obj.max_radius = params.get("max_radius", gng_obj.max_radius)
+        gng_obj.eb = params.get("learning_rate_b", gng_obj.eb)
+        gng_obj.en = params.get("learning_rate_n", gng_obj.en)
+        gng_obj.max_age = params.get("max_edge_age", gng_obj.max_age)
+        gng_obj.lambda_step = params.get("lambda_step", gng_obj.lambda_step)
+        gng_obj.alpha = params.get("alpha", gng_obj.alpha)
+        gng_obj.d = params.get("d", gng_obj.d)
+
+        if "nodes" in data:
+            gng_obj.nodes = [np.array(n, dtype=float) for n in data["nodes"]]
+            gng_obj.errors = [0.0] * len(gng_obj.nodes)
+
+        if "local_radii" in data:
+            gng_obj.cached_radii = data["local_radii"]
+
+        if "edges" in data:
+            parsed_edges = {}
+            for k, v in data["edges"].items():
+                u, v_node = map(int, k.split(","))
+                parsed_edges[(u, v_node)] = v
+            gng_obj.edges = parsed_edges
+
+            gng_obj.adj = {}
+            for (u, v) in gng_obj.edges.keys():
+                gng_obj.adj.setdefault(u, set()).add(v)
+                gng_obj.adj.setdefault(v, set()).add(u)
 
     def save_predicate(self, skill_name: str, predicate: Predicate, pred_type: str):
         if not self.log_dir or predicate is None or pred_type not in ['init', 'eff', 'pass']:
@@ -387,30 +432,18 @@ class BrainNetwork:
 
         os.makedirs(self.gas_dir, exist_ok=True)
 
-        parameters = {
-            "max_points": self.max_points,
-            "base_radius": self.base_radius,
-            "max_radius": self.max_radius,
-            "learning_rate_b": self.learning_rate_b,
-            "learning_rate_n": self.learning_rate_n,
-            "max_edge_age": self.max_edge_age,
-            "lambda_step": self.lambda_step,
-            "alpha": self.alpha,
-            "d": self.d,
-        }
-            
-        edges_str_keys = {f"{u},{v}": age for (u, v), age in predicate.edges.items()}
-        radii = [float(predicate._get_local_radius(i)) for i in range(len(predicate.nodes))]
         data = {
-            "parameters": parameters,
-            "nodes": [n.tolist() for n in predicate.nodes],
-            "edges": edges_str_keys,
-            "local_radii": radii
+            "version": "3_val_logic",
+            "gng_pos": self._serialize_single_gng(predicate.gng_pos),
+            "gng_neg": self._serialize_single_gng(predicate.gng_neg)
         }
+
         file_path = os.path.join(self.gas_dir, f"{skill_name}_{pred_type}.json")
         temp_file = os.path.join(self.gas_dir, f"{skill_name}_{pred_type}.tmp")
+
         with open(temp_file, "w") as f:
             json.dump(data, f)
+
         for _ in range(5):
             try:
                 os.replace(temp_file, file_path)
@@ -424,111 +457,67 @@ class BrainNetwork:
                 except OSError:
                     pass
 
-    @staticmethod
-    def load_predicate(file_path) -> Predicate:
+    @classmethod
+    def load_predicate(cls, file_path) -> Predicate:
         with open(file_path, "r") as f:
             data = json.load(f)
-        
-        params = data.get("parameters", {})
+
+        if data.get("version") == "3_val_logic":
+            pos_data = data.get("gng_pos", {})
+            neg_data = data.get("gng_neg", {})
+            params = pos_data.get("parameters", {})
+        else:
+            pos_data = data
+            neg_data = None
+            params = data.get("parameters", {})
+
         pred = Predicate(
-            max_points=params.get("max_points", 50),
-            base_radius=params.get("base_radius", 0.1),
-            max_radius=params.get("max_radius", 1.0),
+            max_points=params.get("max_points", 85),
+            dim=None,
+            base_radius=params.get("base_radius", 0.15),
+            max_radius=params.get("max_radius", 1.75),
             learning_rate_b=params.get("learning_rate_b", 0.2),
-            learning_rate_n=params.get("learning_rate_n", 0.02),
-            max_edge_age=params.get("max_edge_age", 30),
-            lambda_step=params.get("lambda_step", 10),
-            alpha=params.get("alpha", 0.5),
+            learning_rate_n=params.get("learning_rate_n", 0.01),
+            max_edge_age=params.get("max_edge_age", 24),
+            lambda_step=params.get("lambda_step", 5),
+            alpha=params.get("alpha", 0.7),
             d=params.get("d", 0.99)
         )
 
-        if "nodes" in data:
-            pred.nodes = [np.array(n, dtype=float) for n in data["nodes"]]
-            pred.errors = [0.0] * len(pred.nodes)
+        cls._deserialize_single_gng(pred.gng_pos, pos_data)
+        if neg_data:
+            cls._deserialize_single_gng(pred.gng_neg, neg_data)
 
-        # Restore the saved radii!
-        if "local_radii" in data:
-            pred.cached_radii = data["local_radii"]
-        
-        if "edges" in data:
-            parsed_edges = {}
-            for k, v in data["edges"].items():
-                u, v_node = map(int, k.split(","))
-                parsed_edges[(u, v_node)] = v
-            pred.edges = parsed_edges
-        
-            # Populate adj
-            pred.adj = {}
-            for (u, v) in pred.edges.keys():
-                pred.adj.setdefault(u, set()).add(v)
-                pred.adj.setdefault(v, set()).add(u)
-        
         return pred
 
     def load_brain(self, source_dir):
-        print(f"\t[Brain] Loading brain from the files.")
-        if source_dir is None:
-            print(f"\t[Brain] No source directory.")
+        """Loads node predicates directly from disk into the skills dictionary."""
+        print("\t[Brain] Loading brain from files.")
+        if source_dir is None or not os.path.isdir(source_dir):
+            print("\t[Brain] Invalid source directory.")
             return
-        
-        if os.path.isdir(source_dir):
-            src_graphs_file = os.path.join(source_dir, "graphs", "trans_graph.json")
-            src_gas_dir = os.path.join(source_dir, "PDDL", "GNG")
-            
-            target_graphs_file = os.path.join(self.graphs_dir, "trans_graph.json")
-            target_gas_dir = self.gas_dir
-            
-            if not os.path.exists(src_graphs_file):
-                print(f"\t[Brain] Could not find trans_graph.json in {source_dir}")
-                return
-                
-            with open(src_graphs_file, "r") as src_f, open(target_graphs_file, "w") as dst_f:
-                dst_f.write(src_f.read())
-                
-            if os.path.exists(src_gas_dir):
-                for filename in os.listdir(src_gas_dir):
-                    if filename.endswith(".json"):
-                        src_file = os.path.join(src_gas_dir, filename)
-                        dst_file = os.path.join(target_gas_dir, filename)
-                        with open(src_file, "r") as src_f, open(dst_file, "w") as dst_f:
-                            dst_f.write(src_f.read())
 
-            with open(target_graphs_file, "r") as f:
-                graph_data = json.load(f)
-                
-            for idx, node_name in enumerate(graph_data.get("nodes", [])):
-                precondition = None
-                effect = None
+        src_gas_dir = os.path.join(source_dir, "PDDL", "GNG")
+        if not os.path.exists(src_gas_dir):
+            print(f"\t[Brain] Could not find GNG directory: {src_gas_dir}")
+            return
 
-                precondition_file = os.path.join(target_gas_dir, f"{node_name}_init.json")
-                if os.path.exists(precondition_file):
-                    precondition = self.load_predicate(precondition_file)
-                else:
-                    print(f"\t[Brain] Warning: Missing precondition file for node {node_name}")
-                
-                effect_file = os.path.join(target_gas_dir, f"{node_name}_eff.json")
-                if os.path.exists(effect_file):
-                    effect = self.load_predicate(effect_file)
-                else:
-                    print(f"\t[Brain] Warning: Missing effect file for node {node_name}")
+        # Find all skills by scanning for *_init.json files
+        skill_names = set()
+        for filename in os.listdir(src_gas_dir):
+            match = re.match(r"^(.*)_init\.json$", filename)
+            if match:
+                skill_names.add(match.group(1))
 
-                if precondition and effect:
-                    self.add_node(node_name, precondition, effect)    
-            
-            for edge in graph_data.get("edges", []):
-                source = edge.get("source")
-                target = edge.get("target")
-                symbol_name = edge.get("symbol_name")
-                weight = edge.get("weight")
+        for name in skill_names:
+            pre_file = os.path.join(src_gas_dir, f"{name}_init.json")
+            eff_file = os.path.join(src_gas_dir, f"{name}_eff.json")
 
-                self.trans_graph.add_edge(source, target, weight)
-
-                symbol_file = os.path.join(target_gas_dir, f"{symbol_name}_pass.json")
-                if os.path.exists(symbol_file):
-                    symbol = self.load_predicate(symbol_file)
-                    if target in self.trans_graph.edges_by_target and source in self.trans_graph.edges_by_target[target]:
-                        self.trans_graph.edges_by_target[target][source].symbol = symbol
-                else:
-                    print(f"\t[Brain] Warning: Missing symbol file for edge: {source} --> {target}")
-            # recalculate
-            self.abstract_symbols()
+            if os.path.exists(pre_file) and os.path.exists(eff_file):
+                precondition = self.load_predicate(pre_file)
+                effect = self.load_predicate(eff_file)
+                self.add_node(name, precondition, effect)
+                if self.state_dim is None and hasattr(precondition, "gng_pos") and precondition.gng_pos.nodes:
+                    self.state_dim = len(precondition.gng_pos.nodes[0])
+            else:
+                print(f"\t[Brain] Incomplete predicates for skill '{name}', skipping.")

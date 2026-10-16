@@ -11,7 +11,10 @@ import subprocess
 import random
 import numpy as np
 from datetime import datetime
+from statistics import mean, multimode
+import json
 import time
+
 
 class TheAgent(Agent):
     '''
@@ -99,6 +102,7 @@ class TheAgent(Agent):
         
         self.brain = BrainNetwork(log_dir=self.log_dir)
         self.brain.load_brain(resolved_source_dir)
+        self.brain.prepare_nodes(self.skillset.keys())
         
     def _give_current_action(self, request=None):
         return self.current_skill
@@ -215,7 +219,14 @@ class TheAgent(Agent):
                 if self.reset_requested: 
                     self._reset_and_restart()
 
-                plan, start_skill, finish_skill = self.generate_plan()
+                state_now = self.read_state()
+                for sk in self.skillset.keys():
+                    status = self.brain.preconditions_status(sk, state_now)
+                    print(f"#################### {sk} ===> {status}")
+
+                self.bus.call_service("/supervisor/do/switchThink")
+                plan, start_skill, finish_skill = self.generate_plan(goal_skill='Finish', mode='SOFT')
+                self.bus.call_service("/supervisor/do/switchThink")
                 if len(plan) < 1:
                     print("[Agent] Returned empty plan.")
                     self.explore() 
@@ -226,10 +237,15 @@ class TheAgent(Agent):
                 plan_completed = True
                 for i, skill_name in enumerate(plan):
                     print(f"[Agent] Executing step {i+1}/{len(plan)}: {skill_name}")
+                    state_now = self.read_state()
+                    status = self.brain.preconditions_status(skill_name, state_now)
+                    if status == "FALSE": # we allow checking conflicted areas
+                        print(f"[Agent] Plan safety abort: Precondition for {skill_name} is {status}.")
+                        plan_completed = False
+                        break
                     success = self.execute_skill(skill_name, self.previous_skill)
                     if not success:
                         print("[Agent] Failed action. Abandoning the plan.")
-                        self.explore()
                         plan_completed = False
                         break
                     self.previous_skill.name = skill_name
@@ -255,7 +271,9 @@ class TheAgent(Agent):
         self.current_skill = skill_name
         prev_vector_state = self.read_state()
         self.brain.create_node(skill_name)
-        preconditions_are_met = self.brain.preconditions_met(skill_name, prev_vector_state)
+
+        status = self.brain.preconditions_status(skill_name, prev_vector_state)
+        preconditions_are_met = (status == "TRUE")
         
         skill = self.skillset[skill_name]
         succeed = skill.execute()
@@ -264,16 +282,17 @@ class TheAgent(Agent):
         self.record_transition(prev_vector_state, skill_name, post_vector_state, succeed)
         
         data = (prev_vector_state, skill_name, post_vector_state, succeed)
-        expectable = (preconditions_are_met and succeed) or (not preconditions_are_met and not succeed)
-        if not expectable:
+        is_unknown = (status == "UNKNOWN")
+        is_conflicted = (status == "CONFLICT")
+        mismatch = (status == "TRUE" and not succeed) or (status == "FALSE" and succeed)
+        if is_unknown or mismatch or is_conflicted:
             self.add_to_buffor(data)
 
-        # Confusion Matrix Correction:
-        # Predicted True (preconditions met), Actual False -> False Positive
-        # Predicted False (preconditions not met), Actual True -> False Negative
+        # Confusion Matrix:
         if preconditions_are_met:
             if succeed:
                 self.skill_stats[skill_name]['true_positive'] += 1
+                self.add_to_buffor(data) # we also add true positives so the space is represented better 
             else:
                 self.skill_stats[skill_name]['false_positive'] += 1                
         else:
@@ -293,13 +312,24 @@ class TheAgent(Agent):
 
     def explore(self):
         print("[Agent] Explore")
-        available_skills = list(self.skillset.keys())
-        if not available_skills:
-            return None
-        skill_name = random.choice(available_skills)
+        vector_state = self.read_state()
+        unknown_skills = self.brain.get_unknown_skills(vector_state)
+
+        if unknown_skills:
+            skill_name = random.choice(unknown_skills)
+            print(f"[Agent] Exploring UNKNOWN skill: {skill_name}")
+        else:
+            # If all regions are mapped, pick any skill whose negative GNG is not active
+            viable_skills = [
+                sk for sk in self.skillset.keys()
+                if self.brain.preconditions_status(sk, vector_state) != "FALSE"
+            ]
+            skill_name = random.choice(viable_skills) if viable_skills else random.choice(list(self.skillset.keys()))
+            print(f"[Agent] Exploring fallback viable skill: {skill_name}")
+
         succeed = self.execute_skill(skill_name, self.previous_skill)
         self.previous_skill = self.ExecutedSkill(skill_name, succeed)
-        if self.reset_requested: 
+        if self.reset_requested:
             self._reset_and_restart()
      
     def add_to_buffor(self, data):
@@ -313,7 +343,7 @@ class TheAgent(Agent):
         self.fail_buffor.append(data)
         self.timestamps.append(time.time())
 
-    def generate_plan(self, start_skill=None, goal_skill=None, plan_name = None):
+    def generate_plan(self, start_skill=None, goal_skill=None, plan_name = None, mode='HARD'):
         print("[Agent] Generate Plan")
         vector_state = self.read_state()
         if start_skill is None:
@@ -327,23 +357,22 @@ class TheAgent(Agent):
             nodes = self.brain.get_nodes()
             nodes = [n for n in nodes if n != start_skill]
             if not nodes:
-                print(f"[Agent] No nodes in transitional graph.")
+                print(f"[Agent] No nodes to choose from.")
                 return [], None, None
             goal_skill = random.choice(nodes)
 
         print(f"[Agent] Generating plan from {start_skill} to {goal_skill}.")
-
+        
         plan_dir = os.path.join(self.pddl_dir, "newest")
         os.makedirs(plan_dir, exist_ok=True)
         domain_file = os.path.join(plan_dir, "domain.pddl")
         problem_file = os.path.join(plan_dir, "problem.pddl")
         plan_file = os.path.join(plan_dir, "problem.pddl.soln")
 
-        self.brain.abstract_symbols()
         with open(domain_file, "w") as f:
-            f.write(self.brain.generate_domain_pddl())
+            f.write(self.brain.generate_domain_pddl(mode=mode))
         with open(problem_file, "w") as f:
-            f.write(self.brain.generate_problem_pddl(start_skill, goal_skill))
+            f.write(self.brain.generate_problem_pddl(vector_state, goal_skill,mode=mode))
 
         if not os.path.exists(domain_file) or not os.path.exists(problem_file):
             print(f"[Agent] Error: no .pddl files")
@@ -370,8 +399,10 @@ class TheAgent(Agent):
             return [], None, None
 
         if not os.path.exists(plan_file):
+            print(f"[Agent] Pyperplan failed (no plan file).")
             return [], None, None
-
+        
+        self.bus.call_service("/supervisor/do/switchThink")
         executable_plan = []
         with open(plan_file, "r") as f:
             for line in f:
@@ -390,7 +421,7 @@ class TheAgent(Agent):
                     continue
 
                 matched_skill = next(
-                    (sk for sk in self.skillset.keys() if sk.lower() == action_name_lower),
+                    (sk for sk in self.skillset.keys() if action_name_lower.startswith(sk.lower())),
                     None
                 )
                 if matched_skill:
@@ -406,22 +437,46 @@ class TheAgent(Agent):
         return executable_plan, start_skill, goal_skill
 
     def test_run(self):
-        self.brain.abstract_symbols()
         self.brain._logger()
-        self.test_step_executions = []
+    
+        self.tests_data = {}
+
         for i in range(self.N_tests):
+            test_key = str(i)
             print(f"[Agent] Test {i+1}/{self.N_tests}.")
             start = time.time()
+        
             self.bus.call_service("/supervisor/do/restart")
             time.sleep(1.0)
-            plan, _, _ = self.generate_plan(goal_skill='Finish', plan_name=f"test_{i}")
-            
-            if len(plan) < 1:
-                steps_executed = 0
-                last_step = '-'
-                result = False
+        
+            raw_spawn = self.bus.call_service("/supervisor/ask/position")
+            # Ensure spawn_pos becomes standard floats/lists
+            if hasattr(raw_spawn, "tolist"):
+                spawn_pos = raw_spawn.tolist()
+            elif isinstance(raw_spawn, (list, tuple)):
+                spawn_pos = [float(x) if hasattr(x, "item") else x for x in raw_spawn]
             else:
-                last_step = '-'
+                spawn_pos = raw_spawn
+
+            self.bus.call_service("/supervisor/do/switchThink")
+            plan, _, _ = self.generate_plan(goal_skill='Finish', plan_name=f"test_{i}")
+            self.bus.call_service("/supervisor/do/switchThink")
+
+            test_record = {
+                "test_idx": i,
+                "plan": plan if plan else [],
+                "plan_length": len(plan) if plan else 0,
+                "steps_executed": 0,
+                "last_step": "-",
+                "result": False,
+                "spawn_pos": spawn_pos,
+                "duration": 0.0,
+                "steps": []
+            }
+
+            if not plan or len(plan) < 1:
+                test_record["result"] = False
+            else:
                 result = True
                 print(f"[Agent] Executing plan: {plan}")
                 for step, skill_name in enumerate(plan):
@@ -431,30 +486,26 @@ class TheAgent(Agent):
                     
                     if not preconditions_are_met:
                         print(f"[Agent] Preconditions are not met: {skill_name}")
-                        # Record failure due to unmet preconditions
-                        self.test_step_executions.append({
-                            'test_idx': i,
-                            'step': step,
-                            'skill': skill_name,
-                            'succeed': False,
-                            'reason': 'preconditions_failed'
+                        test_record["steps"].append({
+                            "step": step,
+                            "skill": skill_name,
+                            "succeed": False,
+                            "reason": "preconditions_failed"
                         })
-                        steps_executed = step
+                        test_record["steps_executed"] = step
                         result = False
                         break
                     
                     skill = self.skillset[skill_name]
                     succeed = skill.execute()
-                    last_step = skill_name
-                    steps_executed = step + 1
+                    test_record["last_step"] = skill_name
+                    test_record["steps_executed"] = step + 1
 
-                    # Record execution result for this step
-                    self.test_step_executions.append({
-                        'test_idx': i,
-                        'step': step,
-                        'skill': skill_name,
-                        'succeed': bool(succeed),
-                        'reason': 'execution'
+                    test_record["steps"].append({
+                        "step": step,
+                        "skill": skill_name,
+                        "succeed": bool(succeed),
+                        "reason": "execution"
                     })
                     
                     if not succeed:
@@ -462,94 +513,201 @@ class TheAgent(Agent):
                         result = False
                         break
 
-            duration = time.time() - start 
-            self.tests.append((i, len(plan), steps_executed, last_step, duration, result))
-            if result:
+                test_record["result"] = result
+
+            test_record["duration"] = time.time() - start
+            self.tests_data[test_key] = test_record
+
+            if test_record["result"]:
                 print(f"[Agent] Test succeed.")
             else:
                 print(f"[Agent] Test failed.")
 
-        # Run the logger at the end of all tests
         self._test_logger()
-
+    
     def _test_logger(self):
-        if not self.tests:
+        if not self.tests_data:
             print("[Agent] No test records to log.")
             return
 
-        from statistics import mean, multimode
+        tests_list = list(self.tests_data.values())
+        n_tests = len(tests_list)
 
-        plan_lengths = [t[1] for t in self.tests]
-        steps_executed = [t[2] for t in self.tests]
-        durations = [t[4] for t in self.tests]
-        results = [1 if t[5] else 0 for t in self.tests]
+        plan_lengths = [t["plan_length"] for t in tests_list]
+        steps_executed = [t["steps_executed"] for t in tests_list]
+        durations = [t["duration"] for t in tests_list]
+        results = [1 if t["result"] else 0 for t in tests_list]
+    
+        # Extract bounds for successful starts
+        successful_spawns = [
+            t["spawn_pos"] for t in tests_list 
+            if t["result"] and t["spawn_pos"] is not None
+        ]
+    
+        acceptable_start_plane = None
+        if successful_spawns:
+            try:
+                dims = len(successful_spawns[0]) if isinstance(successful_spawns[0], (list, tuple)) else 1
+                if dims > 1:
+                    min_bounds = [float(min(p[d] for p in successful_spawns)) for d in range(dims)]
+                    max_bounds = [float(max(p[d] for p in successful_spawns)) for d in range(dims)]
+                else:
+                    min_bounds = [float(min(successful_spawns))]
+                    max_bounds = [float(max(successful_spawns))]
+                acceptable_start_plane = {
+                    "min_bounds": min_bounds,
+                    "max_bounds": max_bounds,
+                    "successful_positions": successful_spawns
+                }
+            except Exception:
+                acceptable_start_plane = {"successful_positions": successful_spawns}
 
-        # Calculate metrics
-        mean_plan_length = mean(plan_lengths) if plan_lengths else 0.0
-        mode_plan_length = multimode(plan_lengths) if plan_lengths else []
+        # Tracking Most Popular Plan Sequences
+        plan_frequencies = {}
+        transition_outcomes = {}
 
-        mean_steps_executed = mean(steps_executed) if steps_executed else 0.0
-        mode_steps_executed = multimode(steps_executed) if steps_executed else []
+        for t in tests_list:
+            plan_tuple = tuple(t.get("plan", []))
+            if plan_tuple:
+                plan_str = " -> ".join(plan_tuple)
+                if plan_str not in plan_frequencies:
+                    plan_frequencies[plan_str] = {"total": 0, "succeeded": 0, "failed": 0}
+                plan_frequencies[plan_str]["total"] += 1
+                if t["result"]:
+                    plan_frequencies[plan_str]["succeeded"] += 1
+                else:
+                    plan_frequencies[plan_str]["failed"] += 1
 
-        mean_execution_duration = mean(durations) if durations else 0.0
+            steps = t.get("steps", [])
+            for k in range(len(steps)):
+                current_sk = steps[k]["skill"]
+                succeed = steps[k]["succeed"]
+            
+                trans_key = f"Start -> {current_sk}" if k == 0 else f"{steps[k-1]['skill']} -> {current_sk}"
+                
+                if trans_key not in transition_outcomes:
+                    transition_outcomes[trans_key] = {"attempts": 0, "failed": 0}
+            
+                transition_outcomes[trans_key]["attempts"] += 1
+                if not succeed:
+                    transition_outcomes[trans_key]["failed"] += 1
+
         success_rate = mean(results) if results else 0.0
-
-        # Build graph-ready matrix: skill -> step -> {success: count, fail: count}
-        # Supports visualizing stacked/grouped bar charts of skill execution per step index
-        step_graph_data = {}
-        for entry in self.test_step_executions:
-            skill = entry['skill']
-            step = entry['step']
-            succeed = entry['succeed']
-
-            if skill not in step_graph_data:
-                step_graph_data[skill] = {}
-            if step not in step_graph_data[skill]:
-                step_graph_data[skill][step] = {'succeed': 0, 'fail': 0, 'total': 0}
-
-            if succeed:
-                step_graph_data[skill][step]['succeed'] += 1
-            else:
-                step_graph_data[skill][step]['fail'] += 1
-            step_graph_data[skill][step]['total'] += 1
+        mean_plan_len = mean(plan_lengths) if plan_lengths else 0.0
+        mode_plan_len = multimode(plan_lengths) if plan_lengths else []
+        mean_steps = mean(steps_executed) if steps_executed else 0.0
+        mode_steps = multimode(steps_executed) if steps_executed else []
+        mean_dur = mean(durations) if durations else 0.0
 
         summary = {
-            "total_tests": len(self.tests),
-            "success_rate": success_rate,
-            "mean_plan_length": mean_plan_length,
-            "mode_plan_length": mode_plan_length,
-            "mean_steps_executed": mean_steps_executed,
-            "mode_steps_executed": mode_steps_executed,
-            "mean_execution_time_s": mean_execution_duration,
-            "step_graph_data": step_graph_data,
-            "raw_step_executions": self.test_step_executions
+            "overall_statistics": {
+                "total_tests": n_tests,
+                "success_rate": success_rate,
+                "mean_plan_length": mean_plan_len,
+                "mode_plan_length": mode_plan_len,
+                "mean_steps_executed": mean_steps,
+                "mode_steps_executed": mode_steps,
+                "mean_execution_time_s": mean_dur,
+                "acceptable_start_position_plane": acceptable_start_plane,
+            },
+            "plan_frequencies": plan_frequencies,
+            "transition_outcomes": transition_outcomes,
+            "tests": self.tests_data
         }
 
-        # 1. Save machine-readable JSON for graph generation
-        if hasattr(self, 'test_stats_path') and self.test_stats_path:
-            with open(self.test_stats_path, "w") as f:
-                json.dump(summary, f, indent=4)
-            print(f"[Agent] Saved test plot data to {self.test_stats_path}")
+        # --- Build Human-Readable Text Summary ---
+        total_passed = sum(results)
+        total_failed = n_tests - total_passed
+        lines = [
+            "=" * 60,
+            "                    AGENT TEST SUMMARY",
+            "=" * 60,
+            "",
+            "OVERALL PERFORMANCE",
+            "-" * 40,
+            f"Total Tests Run       : {n_tests}",
+            f"Passed / Failed       : {total_passed} / {total_failed}",
+            f"Success Rate          : {success_rate * 100:.2f}%",
+            f"Mean Duration         : {mean_dur:.2f} s",
+            f"Mean Plan Length      : {mean_plan_len:.2f} (modes: {mode_plan_len})",
+            f"Mean Steps Executed   : {mean_steps:.2f} (modes: {mode_steps})",
+            "",
+        ]
 
-        # 2. Save human-readable text report
-        if hasattr(self, 'test_stats_txt_path') and self.test_stats_txt_path:
-            with open(self.test_stats_txt_path, "w") as f:
-                f.write("=" * 80 + "\n")
-                f.write(f"TEST SESSION STATISTICS (N = {len(self.tests)})\n")
-                f.write("=" * 80 + "\n\n")
-                f.write(f"Success Rate:                 {success_rate * 100:.2f}%\n")
-                f.write(f"Mean Plan Length:             {mean_plan_length:.2f}\n")
-                f.write(f"Mode Plan Length:             {mode_plan_length}\n")
-                f.write(f"Mean Steps Executed:          {mean_steps_executed:.2f}\n")
-                f.write(f"Mode Steps Executed:          {mode_steps_executed}\n")
-                f.write(f"Mean Plan Execution Time (s): {mean_execution_duration:.3f}\n\n")
-                
-                f.write("-" * 80 + "\n")
-                f.write("STEP-BY-STEP EXECUTION FREQUENCY & OUTCOMES\n")
-                f.write("-" * 80 + "\n")
-                f.write(f"{'Skill Name':<20} | {'Step':<6} | {'Succeed':<8} | {'Failed':<8} | {'Total':<8}\n")
-                f.write("-" * 80 + "\n")
-                for sk_name, steps in sorted(step_graph_data.items()):
-                    for step_idx, counts in sorted(steps.items()):
-                        f.write(f"{sk_name:<20} | {step_idx:<6} | {counts['succeed']:<8} | {counts['fail']:<8} | {counts['total']:<8}\n")
-                f.write("=" * 80 + "\n")
+        # Spawn Bounds
+        if acceptable_start_plane and "min_bounds" in acceptable_start_plane:
+            min_b = [f"{b:.2f}" for b in acceptable_start_plane["min_bounds"]]
+            max_b = [f"{b:.2f}" for b in acceptable_start_plane["max_bounds"]]
+            lines.extend([
+                "SUCCESSFUL SPAWN ENVELOPE",
+                "-" * 40,
+                f"Min Bounds : [{', '.join(min_b)}]",
+                f"Max Bounds : [{', '.join(max_b)}]",
+                f"Total Valid Spawns : {len(acceptable_start_plane.get('successful_positions', []))}",
+                "",
+            ])
+
+        # Top Plans Breakdown
+        lines.extend([
+            "PLAN SEQUENCES (Sorted by Frequency)",
+            "-" * 40,
+        ])
+        sorted_plans = sorted(plan_frequencies.items(), key=lambda kv: kv[1]["total"], reverse=True)
+        if sorted_plans:
+            for plan_str, counts in sorted_plans:
+                pct = (counts["succeeded"] / counts["total"]) * 100 if counts["total"] else 0.0
+                lines.append(f"• [{counts['total']}x] {plan_str}")
+                lines.append(f"    Passed: {counts['succeeded']} | Failed: {counts['failed']} | Success: {pct:.1f}%")
+        else:
+            lines.append("  (No plans recorded)")
+        lines.append("")
+
+        # Skill Transition Reliability Breakdown
+        lines.extend([
+            "TRANSITION RELIABILITY (Sorted by Fail Rate)",
+            "-" * 40,
+        ])
+        sorted_trans = sorted(
+            transition_outcomes.items(),
+            key=lambda kv: (kv[1]["failed"] / kv[1]["attempts"] if kv[1]["attempts"] else 0.0),
+            reverse=True
+        )
+        if sorted_trans:
+            for trans_str, counts in sorted_trans:
+                att = counts["attempts"]
+                fail = counts["failed"]
+                fail_rate = (fail / att) * 100 if att else 0.0
+                lines.append(f"• {trans_str:<32} -> {att - fail}/{att} ok ({fail_rate:.1f}% fail rate)")
+        else:
+            lines.append("  (No transitions recorded)")
+        lines.append("")
+        lines.append("=" * 60)
+
+        txt_summary = "\n".join(lines)
+
+        # --- Save JSON and TXT ---
+        class NumpyEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                if isinstance(obj, (np.integer, np.floating)):
+                    return obj.item()
+                if isinstance(obj, np.bool_):
+                    return bool(obj)
+                return super().default(obj)
+
+        if hasattr(self, 'test_stats_path') and self.test_stats_path:
+            # Save JSON
+            with open(self.test_stats_path, "w") as f:
+                json.dump(summary, f, indent=4, cls=NumpyEncoder)
+            print(f"[Agent] Saved test data to {self.test_stats_path}")
+
+            # Save TXT (e.g., replaces .json with _summary.txt)
+            txt_path = getattr(self, 'test_summary_path', None)
+            if not txt_path:
+                base_root, _ = os.path.splitext(self.test_stats_path)
+                txt_path = f"{base_root}_summary.txt"
+
+            with open(txt_path, "w") as f:
+                f.write(txt_summary)
+            print(f"[Agent] Saved readable test summary to {txt_path}")

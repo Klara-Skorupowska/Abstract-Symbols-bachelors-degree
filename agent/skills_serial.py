@@ -376,7 +376,6 @@ class GoThroughTheDoor(SerialSkill):
             print(f"\t[Skill] {self.__class__.__name__} failed. Not in the door zone.")
             return False
         init_room = self.bus.call_service(f"/supervisor/ask/room_number")
-
         # Start moving forward
         self.wheels.set_parameters([self.velocity, self.velocity])
         start_time = time.time()
@@ -390,6 +389,9 @@ class GoThroughTheDoor(SerialSkill):
             # logic
             if not room == init_room and not zone and open_space:
                 self.wheels.set_parameters([0.0, 0.0])
+                if room == 1: 
+                    print(f"\t[Skill] {self.__class__.__name__} failed. Ended in the wrong room.")
+                    return False
                 print(f"\t[Skill] {self.__class__.__name__} finished successfully.")
                 return True 
             time.sleep(0.05)

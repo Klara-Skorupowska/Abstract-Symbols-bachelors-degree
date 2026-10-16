@@ -17,6 +17,7 @@ class Supervisor():
         self.last_position = None
         self.arena_id = self.bus.call_service(f"/arena/give_id")
         
+        self.bus.register_service(f"/supervisor/ask/position", self.robots_pos)
         self.bus.register_service(f"/supervisor/ask/room_number", self.which_room)
         self.bus.register_service(f"/supervisor/ask/door_zone", self.door_zone)
         self.bus.register_service(f"/supervisor/ask/goal_zone", self.goal_zone)
@@ -26,6 +27,10 @@ class Supervisor():
         self.bus.register_service(f"/supervisor/do/switchSleep", self.switch_sleep)
         self.sleeping = False
         self.sleep_text_id = None
+
+        self.bus.register_service(f"/supervisor/do/switchThink", self.switch_think)
+        self.thinking = False
+        self.think_text_id = None
 
     def setup(self):
         # call from other sources
@@ -71,6 +76,38 @@ class Supervisor():
 
         return self.sleeping
 
+    def switch_think(self, request=None):
+        '''
+        Draw '???' above the robot, while is on
+        '''
+        if not self.thinking:
+            pos, _ = p.getBasePositionAndOrientation(self.robot_id)
+            text_pos = [pos[0], pos[1], pos[2] + 0.4]  # 0.4 m above robot base
+            
+            self.think_text_id = p.addUserDebugText(
+                text="???",
+                textPosition=text_pos,
+                textColorRGB=[0.2, 1.0, 0.6],  # Soft green
+                textSize=1.5,
+                lifeTime=0  # 0 keeps it until manually removed
+            )
+            self.thinking = True
+        else:
+            if self.think_text_id is not None:
+                p.removeUserDebugItem(self.think_text_id)
+                self.think_text_id = None
+            self.thinking = False
+
+        return self.thinking
+
+    def robots_pos(self, request=None):
+        position, _ = p.getBasePositionAndOrientation(self.robot_id)
+        point = np.array(position[:2])
+        if hasattr(point, "tolist"):
+            point = point.tolist()
+        elif isinstance(point, (list, tuple)):
+            point = [float(x) if hasattr(x, "item") else x for x in point]
+        return point
 
     def which_room(self, request=None):
         '''
@@ -90,7 +127,7 @@ class Supervisor():
 
         if self.last_position is not None:
             distance = math.dist(position, self.last_position)
-            if distance < 0.01 and not self.sleeping:
+            if distance < 0.01 and not self.sleeping and not self.thinking:
                 print("[Supervisor] Robot stuck in place for too long.")
                 # Notify the agent that an environmental reset is needed
                 self.bus.publish("/supervisor/event/reset", {"reason": "stuck"})

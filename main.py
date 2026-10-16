@@ -1,11 +1,11 @@
 ## main file ###
 
 # --- imports ---
+import json
 import os.path
-import threading
-
-import time
 import re
+import threading
+import time
 from datetime import datetime
 
 from simulation import *
@@ -14,8 +14,72 @@ from supervisor import *
 from communicator import Communicator
 
 
+def save_session_info(
+    session_path: str,
+    chosen_session_dir: str,
+    runs: int,
+    tests: int,
+    time_limit: float,
+    min_success_rate: float,
+    agent: TheAgent,
+    robot,
+    arena
+):
+    """Generates an info.txt file with run parameters, brain hyperparameters, and component types."""
+    if not os.path.exists(session_path):
+        os.makedirs(session_path, exist_ok=True)
+
+    info_file_path = os.path.join(session_path, "info.txt")
+
+    brain = getattr(agent, "brain_network", None)
+    
+    # Extract brain_network hyperparameters with fallbacks
+    hyperparams = {
+        "min_overlap_ratio": getattr(brain, "min_overlap_ratio", 0.7),
+        "max_points": getattr(brain, "max_points", 85),
+        "base_radius": getattr(brain, "base_radius", 0.15),
+        "max_radius": getattr(brain, "max_radius", 1.75),
+        "learning_rate_b": getattr(brain, "learning_rate_b", 0.2),
+        "learning_rate_n": getattr(brain, "learning_rate_n", 0.01),
+        "max_edge_age": getattr(brain, "max_edge_age", 24),
+        "lambda_step": getattr(brain, "lambda_step", 5),
+        "alpha": getattr(brain, "alpha", 0.7),
+        "d": getattr(brain, "d", 0.99),
+    }
+
+    content = [
+        "========================================",
+        "          EXPERIMENT RUN INFO           ",
+        "========================================",
+        f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "--- SESSION CONFIGURATION ---",
+        f"Chosen session_dir: {chosen_session_dir}",
+        f"Runs per epoch: {runs}",
+        f"Tests per epoch: {tests}",
+        f"Time limit for learning: {time_limit} hours",
+        f"Min success rate to stop learning: {min_success_rate}",
+        "",
+        "--- COMPONENT TYPES ---",
+        f"Agent type: {type(agent).__name__}",
+        f"Robot type: {type(robot).__name__}",
+        f"Arena type: {type(arena).__name__}",
+        "",
+        "--- BRAIN NETWORK HYPERPARAMETERS ---",
+    ]
+
+    for param, val in hyperparams.items():
+        content.append(f"{param}: {val}")
+
+    content.append("========================================\n")
+
+    with open(info_file_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(content))
+    print(f"[Info] Saved session metadata to {info_file_path}")
+
+
 # --- let's go ---
-def main(session_dir, runs, tests):
+def main(session_dir, runs, tests, time_limit=None, min_success_rate=None, is_first_run=False):
     print("Starting")
     print("Open communication")
     bus = Communicator()
@@ -26,9 +90,26 @@ def main(session_dir, runs, tests):
     robot = RealRobot(bus)
     arena = Arena()
     ### ---- ------ ---------- ---- ---- ###
+
+    # Write info.txt on the initial run
+    if is_first_run:
+        actual_session_dir = getattr(agent, "session_dir", None) or get_latest_session("logs")
+        if actual_session_dir:
+            save_session_info(
+                session_path=actual_session_dir,
+                chosen_session_dir=session_dir,
+                runs=runs,
+                tests=tests,
+                time_limit=time_limit,
+                min_success_rate=min_success_rate,
+                agent=agent,
+                robot=robot,
+                arena=arena
+            )
+
     # event for waiting for full simulation initialization
     simulation_ready_event = threading.Event()
-    # event for waiting for full suprevisor and data initialization
+    # event for waiting for full supervisor and data initialization
     supervisor_ready_event = threading.Event()
     # event for closing everything
     stop_event = threading.Event()
@@ -67,10 +148,13 @@ def get_success_rate(file_path: str) -> float:
             data = json.load(f)
         
         # 'success_rate' in test_statistics.json is stored as a float between 0.0 and 1.0
-        if "success_rate" in data:
-            return float(data["success_rate"])
+        if "overall_statistics" in data:
+            stats = data["overall_statistics"]
+            if "success_rate" in stats:
+                rate = stats["success_rate"]
+                return float(rate)
         
-        raise ValueError("Key 'success_rate' not found in test statistics JSON file.")
+        raise ValueError("Keys 'overall_statistics' or 'success_rate' not found in test statistics JSON file.")
     raise ValueError("No success rate in given file (JSON).")
 
 def get_runs(file_path: str) -> int:
@@ -86,14 +170,8 @@ def get_runs(file_path: str) -> int:
 def append_text_to_file(file_path: str, text: str, ensure_newline: bool = True) -> None:
     """
     Dopisuje podany tekst na koniec pliku.
-    
-    :param file_path: Ścieżka do pliku.
-    :param text: Tekst do dopisania.
-    :param ensure_newline: Jeśli True, upewnia się, że dopisywany tekst zaczyna się od nowej linii
-                           oraz kończy znakiem nowej linii.
     """
     if ensure_newline:
-        # Sprawdzamy, czy plik istnieje i czy kończy się już nową linią
         prefix = ""
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -103,7 +181,6 @@ def append_text_to_file(file_path: str, text: str, ensure_newline: bool = True) 
         except FileNotFoundError:
             pass
 
-        # Upewniamy się, że dodawany tekst kończy się nową linią
         suffix = "" if text.endswith("\n") else "\n"
         text = prefix + text + suffix
 
@@ -131,10 +208,21 @@ def run_til_success(session_dir, runs, tests, time_limit = 2, min_success_rate =
     sum_runs = 0
     retries = 0
     start_time = time.time()
-    while time.time() - start_time < time_limit*3600:
+    
+    # Store initial chosen session directory before loops switch to 'continue'
+    initial_chosen_dir = session_dir
+
+    while time.time() - start_time < time_limit * 3600:
         retries += 1
 
-        main(session_dir, runs, tests) # MAIN LOOP #
+        main(
+            session_dir=session_dir,
+            runs=runs,
+            tests=tests,
+            time_limit=time_limit,
+            min_success_rate=min_success_rate,
+            is_first_run=(retries == 1)
+        )  # MAIN LOOP #
 
         session_dir = 'continue'
         stats_file_path = os.path.join(get_latest_session("logs"), "execution_statistics.txt")
@@ -152,12 +240,12 @@ def run_til_success(session_dir, runs, tests, time_limit = 2, min_success_rate =
 
 if __name__ == "__main__":
     ### Choose Parameters Here ###
-    session_dir = 'continue'    # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
+    session_dir = 'new'    # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
     runs = 1000                 # no. runs - either execution of plan or exploration - before test
     tests = 10                  # how many times tries to go from an active skill to finish from random spawn
     time_limit = 24             # in hours, passing the limit breaks the loop
-    min_success_rate = 0.9      # % of successful tests to break the loop early
+    min_success_rate = 0.7      # % of successful tests to break the loop early
 
     run_til_success(session_dir, runs, tests, time_limit, min_success_rate)
 
-    main("continue", 0, 1000) # extra tests
+    main("continue", 0, 1000)   # extra tests
