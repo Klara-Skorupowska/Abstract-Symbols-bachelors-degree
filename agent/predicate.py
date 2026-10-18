@@ -153,10 +153,11 @@ class GNG:
 
 class Predicate:
     """
-    Epistemic 3-state Predicate wrapping positive and negative GNG manifolds.
+    Epistemic 4-state Predicate wrapping positive and negative GNG manifolds.
     States:
       'TRUE'    -> pos is active and neg is inactive
       'FALSE'   -> neg is active
+      'CONFLICT'-> both active
       'UNKNOWN' -> neither pos nor neg is active
     """
     def __init__(self, max_points, dim=None, base_radius=0.1, max_radius=1.0,
@@ -202,4 +203,14 @@ class Predicate:
         return self.evaluate(vector) == "FALSE"
 
     def is_acceptable(self, vector) -> bool:
+        '''the positive GNG fires'''
         return self.gng_pos.is_active(vector)
+    
+    def is_covered_by(self, other_predicates: list) -> bool:
+        """It checks whether the `gng_pos` prototype nodes are covered by the set union of the given predicates."""
+        if not self.nodes:
+            return False
+        for pt in self.nodes:
+            if not any(other.is_acceptable(pt) for other in other_predicates):
+                return False
+        return True

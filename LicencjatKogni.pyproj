@@ -34,6 +34,7 @@
     <Compile Include="additional_scripts\transition_analysis.py" />
     <Compile Include="additional_scripts\tune_hypers.py" />
     <Compile Include="agent\predicate.py" />
+    <Compile Include="supervisor\graph_maker.py" />
     <Compile Include="supervisor\visualize.py" />
     <Compile Include="agent\core.py" />
     <Compile Include="agent\agent_loop.py" />

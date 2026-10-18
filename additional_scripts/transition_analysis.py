@@ -229,10 +229,10 @@ class VennPic(Renderer):
 
 
 
-SESSION = "2026-10-14_15-13"
+SESSION = "2026-10-18_16-54"
 SKILL_ORDER = [
-    "Start", "Find_the_Door", "Go_to_the_Door", "Open_the_Door",
-    "Find_the_Goal", "Go_to_the_Goal", "Finish"
+    "Start", "Find_The_Door", "Go_To_The_Door", "Open_The_Door",
+    "Find_The_Goal", "Go_To_The_Goal", "Finish"
 ]
 
 brain = BrainNetwork(log_dir=f"logs/transition_analysis/{SESSION}")

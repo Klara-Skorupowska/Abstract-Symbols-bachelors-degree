@@ -48,11 +48,11 @@ class TheAgent(Agent):
         velocity = 15
         self.skillset = {
             'Start': Start(bus, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=1.0),
-            'Find_the_Door': SpotTheColor(60, self.camera, self.lidars, self.wheels, velocity, save_dist, timeout=4.0),
-            'Go_to_the_Door': GoToTheDoor(bus, 60, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=15.0),
-            'Open_the_Door': GoThroughTheDoor(bus, self.camera, self.lidars, self.wheels, velocity, save_dist, timeout=10.0),
-            'Find_the_Goal': SpotTheColor(26, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=4.0),
-            'Go_to_the_Goal': GoToTheGoal(bus, 26, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=15.0),
+            'Find_The_Door': SpotTheColor(60, self.camera, self.lidars, self.wheels, velocity, save_dist, timeout=4.0),
+            'Go_To_The_Door': GoToTheDoor(bus, 60, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=15.0),
+            'Open_The_Door': GoThroughTheDoor(bus, self.camera, self.lidars, self.wheels, velocity, save_dist, timeout=10.0),
+            'Find_The_Goal': SpotTheColor(26, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=4.0),
+            'Go_To_The_Goal': GoToTheGoal(bus, 26, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=15.0),
             'Finish': Finish(bus, 26, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=1.0)
         }
 
@@ -225,7 +225,7 @@ class TheAgent(Agent):
                     print(f"#################### {sk} ===> {status}")
 
                 self.bus.call_service("/supervisor/do/switchThink")
-                plan, start_skill, finish_skill = self.generate_plan(goal_skill='Finish', mode='SOFT')
+                plan, start_skill, finish_skill = self.generate_plan(goal_skill='Finish')
                 self.bus.call_service("/supervisor/do/switchThink")
                 if len(plan) < 1:
                     print("[Agent] Returned empty plan.")
@@ -343,7 +343,7 @@ class TheAgent(Agent):
         self.fail_buffor.append(data)
         self.timestamps.append(time.time())
 
-    def generate_plan(self, start_skill=None, goal_skill=None, plan_name = None, mode='HARD'):
+    def generate_plan(self, start_skill=None, goal_skill=None, plan_name = None):
         print("[Agent] Generate Plan")
         vector_state = self.read_state()
         if start_skill is None:
@@ -363,16 +363,16 @@ class TheAgent(Agent):
 
         print(f"[Agent] Generating plan from {start_skill} to {goal_skill}.")
         
-        plan_dir = os.path.join(self.pddl_dir, "newest")
+        plan_dir = os.path.join(self.pddl_dir, "task")
         os.makedirs(plan_dir, exist_ok=True)
         domain_file = os.path.join(plan_dir, "domain.pddl")
         problem_file = os.path.join(plan_dir, "problem.pddl")
         plan_file = os.path.join(plan_dir, "problem.pddl.soln")
 
         with open(domain_file, "w") as f:
-            f.write(self.brain.generate_domain_pddl(mode=mode))
+            f.write(self.brain.generate_domain_pddl())
         with open(problem_file, "w") as f:
-            f.write(self.brain.generate_problem_pddl(vector_state, goal_skill,mode=mode))
+            f.write(self.brain.generate_problem_pddl(vector_state, goal_skill))
 
         if not os.path.exists(domain_file) or not os.path.exists(problem_file):
             print(f"[Agent] Error: no .pddl files")

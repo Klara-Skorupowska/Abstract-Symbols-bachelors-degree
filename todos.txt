@@ -10,11 +10,21 @@
 ()  - zrobione, a nie było planowane
 ---------------------------------------
 ---------------------------------------
+
+### 16.10.2026 ###
+[] poprawić abstrahowanie symboli, bo plan się nie tworzy
+[~] graf na podstawie pddl'a (przyda się przy sprawdzaniu symboli) = sprawdź czy jest spójne z plikiem
+[] ogólny porządek w kodzie = wyrzucić niepotrzebne, posprawdzać nazwy itp
+[] porządek z wizualizacją: osobne pliki do renderera, live monitoringu i obrazków; osobne klasy per obrazek
+[] na początku generowania planów: nie potrzebujesz aktywnego predykatu jedynie aktywny symbol!
+
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee działo się...
+
 ### 13.09.2026 ###
 [o] testy aż osiągnie wymaganą dokładność
 [o] zobaczyć ile startów mu potrzeba, żeby się nauczył. ODP.: 32k
 [o] ujednolicenie statystyk dla wszystkich testów, zebranie wspólnego histogramu updatów
-[] przeprowanie samych testów, statystyki dla testów: czas, liczba akcji, najbardziej problematyczne akcje
+[o] przeprowanie samych testów, statystyki dla testów: czas, liczba akcji, najbardziej problematyczne akcje
 [o] dodanie do krawędzi ile % punktów się overlappuje (koszt)
 
 ### 12.09.2026 ###

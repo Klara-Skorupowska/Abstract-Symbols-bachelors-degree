@@ -31,20 +31,22 @@ def save_session_info(
 
     info_file_path = os.path.join(session_path, "info.txt")
 
-    brain = getattr(agent, "brain_network", None)
+    brain = getattr(agent, "brain", None)
     
     # Extract brain_network hyperparameters with fallbacks
     hyperparams = {
-        "min_overlap_ratio": getattr(brain, "min_overlap_ratio", 0.7),
-        "max_points": getattr(brain, "max_points", 85),
-        "base_radius": getattr(brain, "base_radius", 0.15),
-        "max_radius": getattr(brain, "max_radius", 1.75),
-        "learning_rate_b": getattr(brain, "learning_rate_b", 0.2),
-        "learning_rate_n": getattr(brain, "learning_rate_n", 0.01),
-        "max_edge_age": getattr(brain, "max_edge_age", 24),
-        "lambda_step": getattr(brain, "lambda_step", 5),
-        "alpha": getattr(brain, "alpha", 0.7),
-        "d": getattr(brain, "d", 0.99),
+        "min_overlap_ratio_SOFT": getattr(brain, "min_overlap_ratio_SOFT", '?'),
+        "min_overlap_ratio_HARD": getattr(brain, "min_overlap_ratio_HARD", '?'),
+        "allowed_variancy": getattr(brain, "allowed_variancy", '?'),
+        "max_points": getattr(brain, "max_points", '?'),
+        "base_radius": getattr(brain, "base_radius", '?'),
+        "max_radius": getattr(brain, "max_radius", '?'),
+        "learning_rate_b": getattr(brain, "learning_rate_b", '?'),
+        "learning_rate_n": getattr(brain, "learning_rate_n", '?'),
+        "max_edge_age": getattr(brain, "max_edge_age", '?'),
+        "lambda_step": getattr(brain, "lambda_step", '?'),
+        "alpha": getattr(brain, "alpha", '?'),
+        "d": getattr(brain, "d", '?'),
     }
 
     content = [
@@ -240,12 +242,13 @@ def run_til_success(session_dir, runs, tests, time_limit = 2, min_success_rate =
 
 if __name__ == "__main__":
     ### Choose Parameters Here ###
-    session_dir = 'new'    # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
+    session_dir = 'new'         # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
     runs = 1000                 # no. runs - either execution of plan or exploration - before test
     tests = 10                  # how many times tries to go from an active skill to finish from random spawn
-    time_limit = 24             # in hours, passing the limit breaks the loop
+    time_limit = 12             # in hours, passing the limit breaks the loop
     min_success_rate = 0.7      # % of successful tests to break the loop early
 
-    run_til_success(session_dir, runs, tests, time_limit, min_success_rate)
+    #run_til_success(session_dir, runs, tests, time_limit, min_success_rate)
+    #main("continue", 0, 1000)   # extra tests
 
-    main("continue", 0, 1000)   # extra tests
+    main("continue", 10, 2)   # once only

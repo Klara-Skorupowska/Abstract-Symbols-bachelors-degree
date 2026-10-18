@@ -3,6 +3,7 @@ from .core import Supervisor
 import threading
 import time
 from .visualize import *
+from .graph_maker import *
 
 def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, stop_event: threading.Event):
     """Runs continuously at 5Hz, completely independent of the agent and simulation."""
@@ -15,6 +16,7 @@ def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, st
     god = Supervisor(bus)
     god.setup()
     monitors = [LiveGraphMonitor(), LiveSkillTableMonitor()] #[LiveGraphMonitor(), LiveSensimotorMonitor(bus), LiveGNGMonitor(), LiveRepresentativePointMonitor(bus), LiveUpdateFrequencyMonitor()]
+    loggers = [GraphFromPDDL()]
     print("[Supervisor] Loaded.")
     setup_complete_event.set() 
     
@@ -28,6 +30,9 @@ def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, st
                 monitor.update()
             if i%(1/time_step*stuck_check_time_step) == 0:
                 god.stuck_check()
+            for log in loggers:
+                if stop_event.is_set(): break
+                log.run()
             time.sleep(time_step)
 
     except KeyboardInterrupt:

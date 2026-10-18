@@ -63,8 +63,8 @@ def parse_predicate_json(data: dict):
     return data, None
 
 SKILL_ORDER = [
-    "Start", "Find_the_Door", "Go_to_the_Door", "Open_the_Door",
-    "Find_the_Goal", "Go_to_the_Goal", "Finish"
+    "Start", "Find_The_Door", "Go_To_The_Door", "Open_The_Door",
+    "Find_The_Goal", "Go_To_The_Goal", "Finish"
 ]
 
 def calculate_predicate_overlap(eff_pred_path: str, init_pred_path: str):
@@ -91,6 +91,32 @@ def calculate_predicate_overlap(eff_pred_path: str, init_pred_path: str):
         return float(len(overlapping_points) / len(eff_pred.nodes))
     except Exception:
         return None
+
+def load_action_masks(stats_file_path: str):
+    """
+    Parses dimension_statistics.txt and returns a dictionary:
+    {
+        'Skill_Name': set([dimension_indices...])
+    }
+    """
+    action_masks = {}
+    if not os.path.exists(stats_file_path):
+        return action_masks
+
+    current_skill = None
+    with open(stats_file_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("Skill:"):
+                current_skill = line.split("Skill:")[1].strip()
+            elif "Changed Dimensions (Action Mask)" in line and current_skill:
+                match = re.search(r"\[(.*?)\]", line)
+                if match:
+                    dims_str = match.group(1).strip()
+                    if dims_str:
+                        dims = [int(x.strip()) for x in dims_str.split(",") if x.strip()]
+                        action_masks[current_skill] = set(dims)
+    return action_masks
 
 # =============================================================================
 # SHARED RENDERERS & UTILS
@@ -365,7 +391,7 @@ class Renderer:
         for edge_info in edges:
             source = edge_info.get("source")
             target = edge_info.get("target")
-            weight = edge_info.get("weight", 0)
+            weight = edge_info.get("weight", 1)
 
             if weight is None or not isinstance(weight, (int, float)) or math.isnan(weight) or math.isinf(weight):
                 weight = 0.0
@@ -813,6 +839,13 @@ class GNGPictureGenerator(PictureGenerator):
         if not os.path.exists(symbols_dir):
             return
 
+        # Load action masks from statistics
+        stats_path = os.path.join(latest_session, "dimension_statistics.txt")
+        if not os.path.exists(stats_path):
+            stats_path = "dimension_statistics.txt"
+        action_masks = load_action_masks(stats_path)
+
+        # Match regular .json as well as _abs.json
         for json_path in glob.glob(os.path.join(symbols_dir, "*.json")):
             try:
                 with open(json_path, 'r') as f:
@@ -829,15 +862,37 @@ class GNGPictureGenerator(PictureGenerator):
                 max_vals = np.max(nodes_pos, axis=0)
                 median_vals = lower_median(nodes_pos, axis=0)
 
+                file_base = os.path.splitext(os.path.basename(json_path))[0]
+                is_abs = file_base.endswith("_abs")
+
+                # Determine active action mask for _abs files
+                action_mask = None
+                if is_abs:
+                    # e.g., 'Find_the_Door_effect_abs' -> skill 'Find_the_Door'
+                    # e.g., 'Find_the_Door_abs' -> skill 'Find_the_Door'
+                    clean_name = file_base[:-4]  # remove '_abs'
+                    for suffix in ["_effect", "_eff", "_init", "_pre"]:
+                        if clean_name.endswith(suffix):
+                            clean_name = clean_name[:-len(suffix)]
+                            break
+                    action_mask = action_masks.get(clean_name, None)
+
                 display_title = self._format_display_name(json_path)
+                if is_abs:
+                    display_title += " (Abstracted Mask)"
+
                 img = self.renderer.create_base_canvas(
                     display_title,
-                    "Positive GNG Invariants (Protected from Negative Domain)"
+                    "Action Mask Invariants (Covered Dimensions)" if is_abs 
+                    else "Positive GNG Invariants (Protected from Negative Domain)"
                 )
 
                 # 1. Lidars (Dimensions 0 to 7)
                 lidar_active = []
                 for i in range(8):
+                    if action_mask is not None and i not in action_mask:
+                        lidar_active.append(False)
+                        continue
                     pos_c = nodes_pos[:, i]
                     neg_c = nodes_neg[:, i] if len(nodes_neg) > 0 else None
                     is_inv = self._is_dimension_invariant(pos_c, neg_c)
@@ -846,42 +901,48 @@ class GNGPictureGenerator(PictureGenerator):
                 lidar_data = list(zip(min_vals[:8], max_vals[:8], median_vals[:8]))
                 self.renderer.draw_lidar(img, lidar_data, mode="categorical", active_flags=lidar_active)
 
-                # 2. Retinal Ganglion Cells
+                # 2. Retinal Ganglion Cells (Dimensions: on=8+c*5, off=9+c*5)
                 ganglion_medians = []
                 active_ganglion = []
                 for cell_idx in range(48):
                     idx_on = 8 + (cell_idx * 5)
                     idx_off = idx_on + 1
 
-                    pos_on, pos_off = nodes_pos[:, idx_on], nodes_pos[:, idx_off]
-                    neg_on = nodes_neg[:, idx_on] if len(nodes_neg) > 0 else None
-                    neg_off = nodes_neg[:, idx_off] if len(nodes_neg) > 0 else None
+                    if action_mask is not None and (idx_on not in action_mask and idx_off not in action_mask):
+                        active_ganglion.append(False)
+                    else:
+                        pos_on, pos_off = nodes_pos[:, idx_on], nodes_pos[:, idx_off]
+                        neg_on = nodes_neg[:, idx_on] if len(nodes_neg) > 0 else None
+                        neg_off = nodes_neg[:, idx_off] if len(nodes_neg) > 0 else None
 
-                    inv_on = self._is_dimension_invariant(pos_on, neg_on)
-                    inv_off = self._is_dimension_invariant(pos_off, neg_off)
+                        inv_on = self._is_dimension_invariant(pos_on, neg_on)
+                        inv_off = self._is_dimension_invariant(pos_off, neg_off)
+                        active_ganglion.append(bool(inv_on and inv_off))
 
-                    active_ganglion.append(bool(inv_on and inv_off))
                     ganglion_medians.append(median_vals[idx_on])
                     ganglion_medians.append(median_vals[idx_off])
 
-                # 3. Cone Cells
+                # 3. Cone Cells (Dimensions: R=10+c*5, G=11+c*5, B=12+c*5)
                 cone_medians = []
                 active_cones = []
                 for cell_idx in range(48):
                     offset = 8 + (cell_idx * 5)
-                    r_p, g_p, b_p = nodes_pos[:, offset + 2], nodes_pos[:, offset + 3], nodes_pos[:, offset + 4]
+                    r_idx, g_idx, b_idx = offset + 2, offset + 3, offset + 4
+                    r_p, g_p, b_p = nodes_pos[:, r_idx], nodes_pos[:, g_idx], nodes_pos[:, b_idx]
                     median_bgr, hue_var_pos = self.renderer.compute_hue_median_stats(r_p, g_p, b_p)
                     cone_medians.append(median_bgr)
 
-                    is_pos_stable = hue_var_pos < self.CIRCULAR_VAR_THRESHOLD
-                    separable = True
-                    if len(nodes_neg) > 0:
-                        for ch in range(3):
-                            if not self._is_dimension_invariant(nodes_pos[:, offset + 2 + ch], nodes_neg[:, offset + 2 + ch]):
-                                separable = False
-                                break
-
-                    active_cones.append(bool(is_pos_stable and separable))
+                    if action_mask is not None and not any(dim in action_mask for dim in (r_idx, g_idx, b_idx)):
+                        active_cones.append(False)
+                    else:
+                        is_pos_stable = hue_var_pos < self.CIRCULAR_VAR_THRESHOLD
+                        separable = True
+                        if len(nodes_neg) > 0:
+                            for ch in range(3):
+                                if not self._is_dimension_invariant(nodes_pos[:, offset + 2 + ch], nodes_neg[:, offset + 2 + ch]):
+                                    separable = False
+                                    break
+                        active_cones.append(bool(is_pos_stable and separable))
 
                 self.renderer.draw_grids(img, (ganglion_medians, cone_medians), is_live=False,
                                          active_ganglion=active_ganglion, active_cones=active_cones)
@@ -892,7 +953,6 @@ class GNGPictureGenerator(PictureGenerator):
                 out_dir = self.get_pictures_dir()
                 if not out_dir:
                     return
-                file_base = os.path.splitext(os.path.basename(json_path))[0]
                 out_path = os.path.join(out_dir, f"{file_base}_invariants.png")
                 cv2.imwrite(out_path, img)
                 print(f"[PictureGenerator] Saved positive GNG invariants to {out_path}")
@@ -916,6 +976,8 @@ class RepresentativePointPictureGenerator(PictureGenerator):
             return name[:-4].replace("_", " ") + " - Effect"
         if name.endswith("_pass"):
             return name[:-5].replace("_", " ") + " - Transition"
+        if name.endswith("_abs"):
+            return name[:-5].replace("_", " ") + " - Abstract Symbol"
         return name.replace("_", " ").strip()
 
     def run(self):
@@ -928,6 +990,11 @@ class RepresentativePointPictureGenerator(PictureGenerator):
         out_dir = self.get_pictures_dir()
         if not out_dir:
             return
+
+        stats_path = os.path.join(latest_session, "dimension_statistics.txt")
+        if not os.path.exists(stats_path):
+            stats_path = "dimension_statistics.txt"
+        action_masks = load_action_masks(stats_path)
 
         for json_path in glob.glob(os.path.join(symbols_dir, "*.json")):
             try:
@@ -944,16 +1011,55 @@ class RepresentativePointPictureGenerator(PictureGenerator):
                 dists = np.linalg.norm(nodes_pos - centroid, axis=1)
                 rep_node = nodes_pos[int(np.argmin(dists))]
 
-                display_title = self._format_display_name(json_path)
                 file_base = os.path.splitext(os.path.basename(json_path))[0]
-                overlap_weight = self._resolve_trans_weight(latest_session, json_path)
+                is_abs = file_base.endswith("_abs")
 
+                # Resolve action mask for _abs files
+                action_mask = None
+                if is_abs:
+                    clean_name = file_base[:-4]
+                    for suffix in ["_effect", "_eff", "_init", "_pre"]:
+                        if clean_name.endswith(suffix):
+                            clean_name = clean_name[:-len(suffix)]
+                            break
+                    action_mask = action_masks.get(clean_name, None)
+
+                # Active flags based on action mask
+                lidar_active = None
+                active_ganglion = None
+                active_cones = None
+
+                if action_mask is not None:
+                    lidar_active = [i in action_mask for i in range(8)]
+                    active_ganglion = [
+                        (8 + c * 5 in action_mask) or (9 + c * 5 in action_mask)
+                        for c in range(48)
+                    ]
+                    active_cones = [
+                        any(8 + c * 5 + ch in action_mask for ch in (2, 3, 4))
+                        for c in range(48)
+                    ]
+
+                display_title = self._format_display_name(json_path)
+                if is_abs:
+                    display_title += " (Action Mask Active)"
+
+                overlap_weight = self._resolve_trans_weight(latest_session, json_path)
                 img = self.renderer.create_base_canvas(
                     display_title,
-                    "Positive GNG Icon: Center Prototype"
+                    "Action Mask Covered Dimensions" if is_abs else "Positive GNG Icon: Center Prototype"
                 )
-                self.renderer.draw_lidar(img, rep_node[:8], center=(230, 280), mode="iconic", custom_color=self.renderer.primary_color)
-                self.renderer.draw_grids(img, rep_node[8:248], is_live=True, origin=(520, 120))
+
+                self.renderer.draw_lidar(
+                    img, rep_node[:8], center=(230, 280),
+                    mode="iconic", active_flags=lidar_active,
+                    custom_color=self.renderer.primary_color
+                )
+                self.renderer.draw_grids(
+                    img, rep_node[8:248], is_live=True,
+                    active_ganglion=active_ganglion, active_cones=active_cones,
+                    origin=(520, 120)
+                )
                 self.renderer.draw_sample_badge(img, n_pos=len(nodes_pos), position=(35, 595), overlap_ratio=overlap_weight)
 
                 out_path = os.path.join(out_dir, f"{file_base}_icon.png")
@@ -1003,7 +1109,7 @@ class TransGraphPictureGenerator(PictureGenerator):
         if not latest_session:
             return
         graphs_dir = os.path.join(latest_session, "graphs")
-        for mode in ('HARD', 'SOFT'):
+        for mode in ('HARD', 'SOFT', 'PDDL'):
             json_path = os.path.join(graphs_dir, f"trans_graph_{mode}.json")
             if not os.path.exists(json_path):
                 return
@@ -1517,7 +1623,7 @@ class LiveUpdateFrequencyMonitor(Renderer):
             self._window_created = False
 
 class LiveGraphMonitor(Renderer):
-    def __init__(self, logs_root="logs", trans_filename="trans_graph_SOFT.json"):
+    def __init__(self, logs_root="logs", trans_filename="trans_graph_PDDL.json"):
         super().__init__()
         self.logs_root = logs_root
         self.trans_filename = trans_filename
@@ -1546,7 +1652,7 @@ class LiveGraphMonitor(Renderer):
                 if mtime > self._last_trans_mtime:
                     with open(trans_path, "r") as f:
                         graph_data = json.load(f)
-                    img = self.create_base_canvas("LIVE TRANSITION GRAPH", "SOFT mode")
+                    img = self.create_base_canvas("LIVE TRANSITION GRAPH", "From PDDL")
                     self.draw_transition_graph(img, graph_data)
                     cv2.imshow(self.trans_window, img)
                     self._last_trans_mtime = mtime
@@ -1700,6 +1806,7 @@ class LiveSkillTableMonitor(Renderer):
 
 
 if __name__ == "__main__":
-    sd = None
+    sd = None #"2026-10-16_22-36"
     gen = PipelinePictureGenerator(session_dir=sd)
+    #gen = TransGraphPictureGenerator(session_dir=sd)
     gen.run()

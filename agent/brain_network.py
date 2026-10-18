@@ -13,10 +13,10 @@ class BrainNetwork:
         self.skills = {}
 
         ### HYPERPARAMETERS ###
-        self.min_overlap_ratio_HARD = 0.75 # for only actiive overlap
-        self.min_overlap_ratio_SOFT = 0.75 # for active and unknown and coflicted
+        self.min_overlap_ratio = 0.75       # how much of the symbol's nodes have to be active to count
+        self.allowed_variancy = 0.02        # for finding invariant dimentions
 
-        self.max_points = 10
+        self.max_points = 20
         self.base_radius = 0.1
         self.max_radius = 8 
         self.learning_rate_b = 0.2
@@ -61,7 +61,7 @@ class BrainNetwork:
             self.create_node(skill_name)
 
     def preconditions_status(self, skill_name: str, state_vector) -> str:
-        """Returns 'TRUE', 'FALSE', or 'UNKNOWN' for the skill's precondition."""
+        """Returns 'TRUE', 'FALSE', 'UNKNOWN' or 'CONFLICT' for the skill's precondition."""
         if skill_name not in self.skills:
             return "UNKNOWN"
         return self.skills[skill_name]["precondition"].evaluate(state_vector)
@@ -107,266 +107,400 @@ class BrainNetwork:
             if succeed:
                 self.skills[skill_name]["effect"].update(post_vector_state, True)
 
+        self.update_allowed_variance()
         self._logger()
 
-    def calculate_overlap(self, preceeding: str, following: str, mode='HARD'):
-        if preceeding == following: 
-            return None, None
+    @staticmethod
+    def _otsu_variance_threshold(variances: np.ndarray, fallback: float = 0.1) -> float:
+        """Finds the variance threshold minimizing intra-class variance between invariant vs changing dims."""
+        # Filter out negligible/numerical zeros
+        valid_variances = variances[variances > 1e-7]
+        if len(valid_variances) < 2:
+            return fallback
+
+        sorted_vars = np.sort(valid_variances)
+        n = len(sorted_vars)
+        best_thresh = sorted_vars[0]
+        best_intra_variance = float("inf")
+
+        for i in range(1, n):
+            w0 = i / n
+            w1 = 1.0 - w0
+            c0, c1 = sorted_vars[:i], sorted_vars[i:]
             
-        src_skill = self.skills.get(preceeding)
-        tgt_skill = self.skills.get(following)
-        if not src_skill or not tgt_skill:
-            return None, None
+            # Weighted sum of intra-class variances
+            intra_variance = w0 * np.var(c0) + w1 * np.var(c1)
+            if intra_variance < best_intra_variance:
+                best_intra_variance = intra_variance
+                best_thresh = sorted_vars[i]
 
-        eff_gng = src_skill["effect"]
-        if not eff_gng.nodes or len(eff_gng.nodes) < 1:
-            return None, None
-            
-        init_gng = tgt_skill["precondition"]
-        if not init_gng.nodes or len(init_gng.nodes) < 1:
-            return None, None
+        return float(best_thresh)
 
-        # Check overlap: soft = not forbidden, hard = active
-        if mode == 'SOFT':
-            overlapping_points = [
-                node for node in eff_gng.nodes 
-                if not init_gng.is_forbidden(node)
-            ]
-        elif mode == 'HARD':
-            overlapping_points = [
-                node for node in eff_gng.nodes 
-                if init_gng.is_acceptable(node)
-            ]
-        else:
-            raise ValueError(f"mode should be SOFT or HARD, not {mode}")
-
-        overlap_ratio = len(overlapping_points) / len(eff_gng.nodes)
-
-        sym_pred = Predicate(
-            max_points=max(self.max_points, len(overlapping_points)),
-            dim=self.state_dim,
-            base_radius=self.base_radius,
-            max_radius=self.max_radius,
-            learning_rate_b=self.learning_rate_b,
-            learning_rate_n=self.learning_rate_n,
-            max_edge_age=self.max_edge_age,
-            lambda_step=1,
-            alpha=self.alpha, 
-            d=self.d
-        )
-        for pt in overlapping_points:
-            sym_pred.update(pt, valence=True)
-
-        return overlap_ratio, sym_pred
-
-    def compute_transitions(self, min_overlap_ratio=None, mode='HARD') -> list:
+    def update_allowed_variance(self):
         """
-        Dynamically computes valid transitions and transition symbols on the fly.
-        Returns a list of dicts: [{'source': str, 'target': str, 'weight': float, 'symbol': Predicate}]
+        Collects dimension variances across all learned skill predicates (precondition & effect)
+        and updates self.allowed_variancy dynamically using Otsu's method.
         """
-        if min_overlap_ratio is None:
-            if mode == 'HARD':
-                min_overlap_ratio = self.min_overlap_ratio_HARD
-            if mode == 'SOFT':
-                min_overlap_ratio = self.min_overlap_ratio_SOFT
+        collected_variances = []
 
+        for skill in self.skills.values():
+            for phase in ("precondition", "effect"):
+                pred = skill[phase]
+                if pred.nodes and len(pred.nodes) >= 2:
+                    nodes_mat = np.asarray(pred.nodes, dtype=float)
+                    # Variance along each dimension for this predicate
+                    dim_variances = np.var(nodes_mat, axis=0)
+                    collected_variances.extend(dim_variances.tolist())
 
-        transitions = []
-        skills_list = list(self.skills.keys())
+        if collected_variances:
+            var_array = np.array(collected_variances, dtype=float)
+            self.allowed_variancy = self._otsu_variance_threshold(
+                var_array, fallback=self.allowed_variancy
+            )
 
-        for src in skills_list:
-            for tgt in skills_list:
-                if src == tgt:
+    def invariant_mask(self, predicate: Predicate) -> np.ndarray:
+        """
+        Returns a boolean mask (np.ndarray of bools), where True indicates an invariant dimension.
+        Considers only those nodes belonging to the 'true' GNG (gng_pos).
+        """
+        if not predicate or not predicate.nodes:
+            if self.state_dim is not None:
+                return np.zeros(self.state_dim, dtype=bool)
+            return np.array([], dtype=bool)
+
+        nodes_mat = np.asarray(predicate.nodes, dtype=float)
+        if len(nodes_mat) < 2:
+            return np.ones(nodes_mat.shape[1], dtype=bool)
+
+        variances = np.var(nodes_mat, axis=0)
+        return variances < self.allowed_variancy
+    
+    def action_mask(self, skill_name: str) -> np.ndarray:
+        """
+        It identifies 'variants' – a mask of dimensions that have changed between the initial condition (precondition) and the final condition (effect) for dimensions that are otherwise invariants.
+        """
+        skill = self.skills.get(skill_name)
+        if not skill:
+            return np.zeros(self.state_dim or 0, dtype=bool)
+
+        pre_pred = skill["precondition"]
+        eff_pred = skill["effect"]
+
+        if not pre_pred.nodes or not eff_pred.nodes:
+            return np.zeros(self.state_dim or 0, dtype=bool)
+
+        mask_pre = self.invariant_mask(pre_pred)
+        mask_eff = self.invariant_mask(eff_pred)
+        candidate_dims = mask_pre | mask_eff
+
+        mean_pre = np.mean(pre_pred.nodes, axis=0)
+        mean_eff = np.mean(eff_pred.nodes, axis=0)
+
+        # A change in a dimension value that exceeds the variance tolerance threshold
+        diff = np.abs(mean_pre - mean_eff)
+        threshold = np.sqrt(self.allowed_variancy)
+
+        return candidate_dims & (diff >= threshold)
+
+    def group_symbols(self, symbols: dict) -> dict:
+        """
+        It verifies the coverage relationships between symbols and reduces them to independent elements.
+        Input and output structure: {skill_name: {'precondition': [gngs], 'effect': [gngs]}}
+        """
+        grouped = {}
+        for skill_name, phases in symbols.items():
+            grouped[skill_name] = {}
+            for phase, pred_list in phases.items():
+                if len(pred_list) <= 1:
+                    grouped[skill_name][phase] = list(pred_list)
                     continue
-                ratio, sym_pred = self.calculate_overlap(src, tgt, mode)
-                if ratio is not None and ratio >= min_overlap_ratio:
-                    transitions.append({
-                        "source": src,
-                        "target": tgt,
-                        "weight": ratio,
-                        "symbol": sym_pred
-                    })
-        return transitions
 
-    def export_transition_graph_json(self, file_path=None, mode='HARD') -> dict:
+                reduced_preds = []
+                for i, sym_a in enumerate(pred_list):
+                    others = [sym for j, sym in enumerate(pred_list) if i != j]
+                    # If the symbol a is entirely covered by the union of the remaining symbols, we replace it
+                    if others and sym_a.is_covered_by(others):
+                        continue
+                    reduced_preds.append(sym_a)
+
+                grouped[skill_name][phase] = reduced_preds if reduced_preds else pred_list
+        return grouped
+
+    def abstract_symbols(self)-> dict:
         """
-        Generates and optionally saves transition graph JSON for visualization.
+        1) Identifies invariants for `init` and `eff`.
+        2) Checks the dimensions of actions that undergo changes.
+        3) Groups the data and creates a map: `{skill_name: {'precondition': [gngs], 'effect': [gngs]}}`.
         """
-        transitions = self.compute_transitions(mode=mode)
-        edges_list = []
+        raw_symbols = {}
+        for skill_name in self.skills.keys():
+            raw_symbols[skill_name] = {
+                "precondition": [self.skills[skill_name]["precondition"]],
+                "effect": [self.skills[skill_name]["effect"]]
+            }
 
-        for edge in transitions:
-            symbol_name = f"sym_{edge['source']}_enables_{edge['target']}"
-            edges_list.append({
-                "source": edge["source"],
-                "target": edge["target"],
-                "symbol_name": symbol_name,
-                "weight": edge["weight"]
-            })
+        return self.group_symbols(raw_symbols)
 
-        graph_data = {
-            "nodes": list(self.skills.keys()),
-            "edges": edges_list
-        }
+    def export_dimension_statistics(self, file_path=None):
+        """
+        Exports dimension invariant and transition analysis to a formatted text file in English.
+        Covers invariant dimensions in precondition, invariant dimensions in effect,
+        and dimensions that changed during action execution.
+        """
+        if not self.log_dir and file_path is None:
+            return
 
-        if file_path:
-            os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-            temp_file = f"{file_path}.tmp"
-            with open(temp_file, "w") as f:
-                json.dump(graph_data, f, indent=4)
-            for _ in range(5):
+        if file_path is None:
+            file_path = os.path.join(self.log_dir, "dimension_statistics.txt")
+
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+
+        lines = [
+            "=" * 70,
+            "SKILL DIMENSION INVARIANT & TRANSITION STATISTICS",
+            "=" * 70,
+            f"State Dimension: {self.state_dim}",
+            f"Allowed Variance Threshold: {self.allowed_variancy}",
+            "-" * 70,
+            ""
+        ]
+
+        for skill_name in sorted(self.skills.keys()):
+            skill = self.skills[skill_name]
+            pre_pred = skill["precondition"]
+            eff_pred = skill["effect"]
+
+            # Compute invariant masks (boolean arrays)
+            pre_inv_mask = self.invariant_mask(pre_pred)
+            eff_inv_mask = self.invariant_mask(eff_pred)
+            act_changed_mask = self.action_mask(skill_name)
+
+            # Convert boolean masks to list of dimension indices
+            pre_invariant_dims = np.where(pre_inv_mask)[0].tolist()
+            eff_invariant_dims = np.where(eff_inv_mask)[0].tolist()
+            changed_dims = np.where(act_changed_mask)[0].tolist()
+
+            lines.append(f"Skill: {skill_name}")
+            lines.append(f"  - Precondition Invariant Dimensions : {pre_invariant_dims}")
+            lines.append(f"  - Effect Invariant Dimensions       : {eff_invariant_dims}")
+            lines.append(f"  - Changed Dimensions (Action Mask)  : {changed_dims}")
+            lines.append("-" * 70)
+
+        temp_file = f"{file_path}.tmp"
+        with open(temp_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+        for _ in range(5):
+            try:
+                os.replace(temp_file, file_path)
+                break
+            except (PermissionError, OSError):
+                time.sleep(0.05)
+        else:
+            if os.path.exists(temp_file):
                 try:
-                    os.replace(temp_file, file_path)
-                    break
-                except (PermissionError, OSError):
-                    time.sleep(0.05)
-            else:
-                if os.path.exists(temp_file):
-                    try:
-                        os.remove(temp_file)
-                    except OSError:
-                        pass
+                    os.remove(temp_file)
+                except OSError:
+                    pass
 
-        return graph_data
+    def save_abstract_symbols(self):
+        """
+        Saves all reduced abstract symbols to JSON files and exports
+        dimension statistics to a text report file.
+        """
+        if not self.log_dir:
+            return
 
-    def generate_domain_pddl(self, domain_name="robot_domain", mode='HARD') -> str:
-        """Generates a STRIPS PDDL domain adhering strictly to Pyperplan syntax rules."""
+        os.makedirs(self.gas_dir, exist_ok=True)
+
+        # 1. Clean previous abstract symbol files
+        for fname in os.listdir(self.gas_dir):
+            if fname.endswith("_abs.json"):
+                try:
+                    os.remove(os.path.join(self.gas_dir, fname))
+                except OSError:
+                    pass
+
+        # 2. Extract and serialize reduced abstract symbols
+        abstract_map = self.abstract_symbols()
+        for skill_name, phases in abstract_map.items():
+            for phase, pred_list in phases.items():
+                for idx, predicate in enumerate(pred_list):
+                    suffix = f"_{idx}" if len(pred_list) > 1 else ""
+                    symbol_identifier = f"{skill_name}_{phase}{suffix}"
+                    self.save_predicate(symbol_identifier, predicate, pred_type='abs')
+
+        # 3. Export dimension statistics report
+        self.export_dimension_statistics()
+
+    def _get_active_abstract_symbols(self, vector, abstract_map: dict) -> set:
+        """Returns a set of active symbols in the format <skill_name>_<precondition/effect> for a given state vector."""
+        active_set = set()
+        for sk_name, phases in abstract_map.items():
+            for phase in ("precondition", "effect"):
+                sym_name = f"{sk_name.lower()}_{phase}"
+                for pred in phases.get(phase, []):
+                    if pred.is_active(vector):
+                        active_set.add(sym_name)
+                        break
+        return active_set
+
+    def _get_skill_abstract_interactions(self, abstract_map: dict, min_ratio=None):
+        """
+        It specifies which abstract symbols are active in the states before and after the execution of each action.
+        """
+        if min_ratio is None:
+            min_ratio = self.min_overlap_ratio
+
+        action_pre = {}
+        action_eff = {}
+
+        for skill_name, skill_data in self.skills.items():
+            sk_lower = skill_name.lower()
+            action_pre[sk_lower] = set()
+            action_eff[sk_lower] = set()
+
+            # Custom action symbols are always active
+            action_pre[sk_lower].add(f"{sk_lower}_precondition")
+            action_eff[sk_lower].add(f"{sk_lower}_effect")
+
+            pre_pts = skill_data["precondition"].nodes
+            eff_pts = skill_data["effect"].nodes
+
+            # Checking for correlation with symbols of other skills
+            for other_name, phases in abstract_map.items():
+                oth_lower = other_name.lower()
+                for phase in ("precondition", "effect"):
+                    sym_label = f"{oth_lower}_{phase}"
+                    preds = phases.get(phase, [])
+                    if not preds:
+                        continue
+
+                    # Precondition
+                    if pre_pts:
+                        active_cnt = sum(
+                            1 for pt in pre_pts if any(p.is_acceptable(pt) for p in preds)
+                        )
+                        if (active_cnt / len(pre_pts)) >= min_ratio:
+                            action_pre[sk_lower].add(sym_label)
+
+                    # Effect
+                    if eff_pts:
+                        active_cnt = sum(
+                            1 for pt in eff_pts if any(p.is_acceptable(pt) for p in preds)
+                        )
+                        if (active_cnt / len(eff_pts)) >= min_ratio:
+                            action_eff[sk_lower].add(sym_label)
+
+        return action_pre, action_eff
+
+    def generate_domain_pddl(self, domain_name="robot_domain") -> str:
+        """
+        Generates a PDDL domain based on abstract symbols: <skill_name>_<precondition/effect>.
+        """
         pddl = [
             f"(define (domain {domain_name})",
             "  (:requirements :strips)",
             "  (:predicates"
         ]
 
-        def format_symbol_name(src: str, tgt: str) -> str:
-            return f"sym_{src.lower()}_to_{tgt.lower()}"
+        abstract_map = self.abstract_symbols()
+        action_pre, action_eff = self._get_skill_abstract_interactions(abstract_map)
 
-        transitions = self.compute_transitions(mode=mode)
+        all_predicates = set()
+        for preds in action_pre.values():
+            all_predicates.update(preds)
+        for preds in action_eff.values():
+            all_predicates.update(preds)
 
-        # 1. Collect all declared predicates
-        predicates = set()
-        for skill in self.skills.keys():
-            predicates.add(f"pre_{skill.lower()}")
-            predicates.add(f"goal_reached_{skill.lower()}")
-
-        for trans in transitions:
-            predicates.add(format_symbol_name(trans["source"], trans["target"]))
-
-        for pred in sorted(predicates):
+        for pred in sorted(all_predicates):
             pddl.append(f"    ({pred})")
         pddl.append("  )")
 
         def format_effect(adds, deletes):
-            effects = [f"({a})" for a in adds]
-            effects.extend([f"(not ({d}))" for d in deletes])
+            effects = [f"({a})" for a in sorted(adds)]
+            effects.extend([f"(not ({d}))" for d in sorted(deletes)])
             if len(effects) == 1:
                 return effects[0]
             return f"(and {' '.join(effects)})"
 
-        # 2. Build actions
         for skill_name in sorted(self.skills.keys()):
             sk_lower = skill_name.lower()
+            pre_conditions = action_pre.get(sk_lower, set())
+            eff_conditions = action_eff.get(sk_lower, set())
 
-            incoming = [
-                format_symbol_name(trans["source"], skill_name)
-                for trans in transitions if trans["target"] == skill_name
-            ]
+            # adds i deletes
+            adds = eff_conditions
+            dels = {f"{sk_lower}_precondition"} | (pre_conditions - eff_conditions)
 
-            outgoing = [
-                format_symbol_name(skill_name, trans["target"])
-                for trans in transitions if trans["source"] == skill_name
-            ]
+            pre_str = " ".join(f"({p})" for p in sorted(pre_conditions))
 
-            # Action 1: Starting from initial precondition
-            adds_init = [f"goal_reached_{sk_lower}"] + outgoing
-            dels_init = [f"pre_{sk_lower}"]
             pddl.extend([
                 "",
-                f"  (:action {sk_lower}_from_init",
+                f"  (:action {sk_lower}",
                 "    :parameters ()",
-                f"    :precondition (and (pre_{sk_lower}))",
-                f"    :effect {format_effect(adds_init, dels_init)}",
+                f"    :precondition (and {pre_str})",
+                f"    :effect {format_effect(adds, dels)}",
                 "  )"
             ])
-
-            # Action 2: Triggered by learned transition symbols
-            for in_sym in incoming:
-                adds_via = [f"goal_reached_{sk_lower}"] + outgoing
-                dels_via = [in_sym]
-                pddl.extend([
-                    "",
-                    f"  (:action {sk_lower}_via_{in_sym}",
-                    "    :parameters ()",
-                    f"    :precondition (and ({in_sym}))",
-                    f"    :effect {format_effect(adds_via, dels_via)}",
-                    "  )"
-                ])
 
         pddl.append(")")
         return "\n".join(pddl)
 
-    def generate_problem_pddl(self, current_vector, goal_skill, start_skill=None, 
-                          problem_name="plan_problem", domain_name="robot_domain", mode='HARD') -> str:
-        init_predicates = []
+    def generate_problem_pddl(self, current_vector, goal_skill: str, start_skill: str = None, 
+                              problem_name="plan_problem", domain_name="robot_domain") -> str:
+        """
+        Generates a PDDL problem. The goal is a conjunction of symbols that are active before the execution of `goal_skill`.
+        """
+        abstract_map = self.abstract_symbols()
+        action_pre, _ = self._get_skill_abstract_interactions(abstract_map)
 
+        # 1.initial state (:init)
+        init_predicates = set()
         if start_skill:
-            # Enforce planning starting strictly from the designated skill
-            init_predicates.append(f"(pre_{start_skill.lower()})")
+            start_lower = start_skill.lower()
+            init_predicates.update(action_pre.get(start_lower, {f"{start_lower}_precondition"}))
         else:
-            # Fallback: direct preconditions in s_0
-            for name, predicates in self.skills.items():
-                if predicates["precondition"] and self.preconditions_met(name, current_vector):
-                    init_predicates.append(f"(pre_{name.lower()})")
+            init_predicates = self._get_active_abstract_symbols(current_vector, abstract_map)
 
-        # Only include active transition symbols if not enforcing a strict starting skill
-        if not start_skill:
-            transitions = self.compute_transitions(mode=mode)
-            for trans in transitions:
-                if trans["symbol"] is not None and trans["symbol"].is_active(current_vector):
-                    init_predicates.append(f"(sym_{trans['source'].lower()}_to_{trans['target'].lower()})")
+        # 2. (:goal) - conjunction of active symbols before execution of goal_skill
+        goal_lower = goal_skill.lower()
+        goal_predicates = action_pre.get(goal_lower, {f"{goal_lower}_precondition"})
 
         pddl = [
             f"(define (problem {problem_name})",
             f"  (:domain {domain_name})",
             "  (:init"
         ]
-        for pred in sorted(set(init_predicates)):
-            pddl.append(f"    {pred}")
-        pddl.extend([
-            "  )",
-            "  (:goal",
-            f"    (goal_reached_{goal_skill.lower()})",
-            "  )",
-            ")"
-        ])
+        for pred in sorted(init_predicates):
+            pddl.append(f"    ({pred})")
+        pddl.append("  )")
+
+        pddl.append("  (:goal")
+        if len(goal_predicates) > 1:
+            goals_str = " ".join(f"({g})" for g in sorted(goal_predicates))
+            pddl.append(f"    (and {goals_str})")
+        elif len(goal_predicates) == 1:
+            pddl.append(f"    ({next(iter(goal_predicates))})")
+        else:
+            pddl.append(f"    ({goal_lower}_precondition)")
+        pddl.append("  )")
+        pddl.append(")")
+
         return "\n".join(pddl)
+
 
     def _logger(self):
         if not self.log_dir:
             return
 
-        # 1. Save all skill predicates
+        # Save all skill predicates
         for skill_name, predicates in self.skills.items():
             self.save_predicate(skill_name, predicates["precondition"], 'init')
             self.save_predicate(skill_name, predicates["effect"], 'eff')
 
-        # 2. Clean old pass symbols if present
-        for f in os.listdir(self.gas_dir):
-            if f.endswith("_pass.json"):
-                try:
-                    os.remove(os.path.join(self.gas_dir, f))
-                except OSError:
-                    pass
-
-        # 3. Compute transitions on the fly and save active transition pass predicates
-        transitions = self.compute_transitions()
-        for edge in transitions:
-            symbol_name = f"sym_{edge['source']}_enables_{edge['target']}"
-            self.save_predicate(symbol_name, edge["symbol"], 'pass')
-
-        # 4. Generate and save trans_graph.json
-        for mode in ('HARD', 'SOFT'):
-            file_path = os.path.join(self.graphs_dir, f"trans_graph_{mode}.json")
-            self.export_transition_graph_json(file_path=file_path, mode=mode)
+        # Save abstract symbols:
+        self.save_abstract_symbols()
 
     @staticmethod
     def _serialize_single_gng(gng_obj) -> dict:
@@ -427,7 +561,7 @@ class BrainNetwork:
                 gng_obj.adj.setdefault(v, set()).add(u)
 
     def save_predicate(self, skill_name: str, predicate: Predicate, pred_type: str):
-        if not self.log_dir or predicate is None or pred_type not in ['init', 'eff', 'pass']:
+        if not self.log_dir or predicate is None or pred_type not in ['init', 'eff', 'pass', 'abs']:
             return
 
         os.makedirs(self.gas_dir, exist_ok=True)
