@@ -2,8 +2,9 @@ from communicator import Communicator
 from .core import Supervisor
 import threading
 import time
-from .visualize import *
-from .graph_maker import *
+from .pipeline_pic_gen import *
+from .pipeline_live import *
+from .graph_from_pddl import *
 
 def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, stop_event: threading.Event):
     """Runs continuously at 5Hz, completely independent of the agent and simulation."""
@@ -15,8 +16,9 @@ def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, st
     stuck_check_time_step = 20 # sec
     god = Supervisor(bus)
     god.setup()
-    monitors = [LiveGraphMonitor(), LiveSkillTableMonitor()] #[LiveGraphMonitor(), LiveSensimotorMonitor(bus), LiveGNGMonitor(), LiveRepresentativePointMonitor(bus), LiveUpdateFrequencyMonitor()]
+    monitors = PipelineLiveMonitor(bus)
     loggers = [GraphFromPDDL()]
+    monitors.setup()
     print("[Supervisor] Loaded.")
     setup_complete_event.set() 
     
@@ -25,9 +27,7 @@ def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, st
         while not stop_event.is_set():
             i+=1
             # updating statusboards and saving continuous data
-            for monitor in monitors:
-                if stop_event.is_set(): break
-                monitor.update()
+            monitors.update()
             if i%(1/time_step*stuck_check_time_step) == 0:
                 god.stuck_check()
             for log in loggers:
@@ -42,8 +42,7 @@ def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, st
         print(f"[Agent] CRITICAL CRASH in run(): {e}")
         traceback.print_exc()
     finally:
-        for monitor in monitors:
-            monitor.close()
+        monitors.close()
         # pictures
         pics = PipelinePictureGenerator(logs_root="logs")
         pics.run()

@@ -35,8 +35,8 @@ def save_session_info(
     
     # Extract brain_network hyperparameters with fallbacks
     hyperparams = {
-        "min_overlap_ratio_SOFT": getattr(brain, "min_overlap_ratio_SOFT", '?'),
-        "min_overlap_ratio_HARD": getattr(brain, "min_overlap_ratio_HARD", '?'),
+        "min_overlap_ratio": getattr(brain, "min_overlap_ratio", '?'),
+        "min_nodes_in_symbol": getattr(brain, "min_nodes", '?'),
         "allowed_variancy": getattr(brain, "allowed_variancy", '?'),
         "max_points": getattr(brain, "max_points", '?'),
         "base_radius": getattr(brain, "base_radius", '?'),
@@ -206,15 +206,19 @@ def get_latest_session(logs_root):
 
     return max(valid_sessions, key=os.path.basename, default=None)
 
-def run_til_success(session_dir, runs, tests, time_limit = 2, min_success_rate = 0.5):
+def run_til_success(session_dir, runs, tests, time_limit = 2, max_sessions = 4, min_success_rate = 0.5):
     sum_runs = 0
     retries = 0
     start_time = time.time()
+    if max_sessions is None:
+        max_sessions = float('inf')
     
     # Store initial chosen session directory before loops switch to 'continue'
     initial_chosen_dir = session_dir
 
     while time.time() - start_time < time_limit * 3600:
+        if retries > max_sessions:
+            break
         retries += 1
 
         main(
@@ -237,18 +241,17 @@ def run_til_success(session_dir, runs, tests, time_limit = 2, min_success_rate =
     hours, remainder = divmod(int(duration), 3600)
     minutes, seconds = divmod(remainder, 60)
     duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    mssg = f"After {retries} attemps ({sum_runs} runs) program achieved success rate of {get_success_rate(tests_file_path):.2f}. Work time: {duration_str}\n"
+    mssg = f"After {retries} attemps ({sum_runs} runs) program achieved success rate of {get_success_rate(tests_file_path):.2f}. Work time: {duration_str}. Initial dir: {initial_chosen_dir}\n"
     append_text_to_file(stats_file_path, mssg)
 
 if __name__ == "__main__":
     ### Choose Parameters Here ###
-    session_dir = 'new'         # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
+    session_dir = 'continue'         # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
     runs = 1000                 # no. runs - either execution of plan or exploration - before test
     tests = 10                  # how many times tries to go from an active skill to finish from random spawn
     time_limit = 12             # in hours, passing the limit breaks the loop
+    max_sessions = 1            # maximum number of session; break the loop early
     min_success_rate = 0.7      # % of successful tests to break the loop early
 
-    #run_til_success(session_dir, runs, tests, time_limit, min_success_rate)
-    #main("continue", 0, 1000)   # extra tests
-
-    main("continue", 10, 2)   # once only
+    run_til_success(session_dir, runs, tests, time_limit, max_sessions, min_success_rate)
+    main("continue", 0, 100)   # extra tests

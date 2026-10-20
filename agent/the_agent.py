@@ -7,6 +7,7 @@ from .brain_network import *
 
 import os
 import sys
+import shutil
 import subprocess
 import random
 import numpy as np
@@ -17,28 +18,24 @@ import time
 
 
 class TheAgent(Agent):
-    '''
-    It explores the environment and abstracts symbols from used skills. 
-    It also accomplishes the goal of moving from one pad to another.
-    '''
-    class ExecutedSkill:
-        def __init__(self, skill_name: str, succeed: bool):
-            self.name = skill_name
-            self.succeed = succeed
-
+    """
+    Explores the environment and abstracts symbols from used skills.
+    Accomplishes the goal of moving from one pad to another.
+    """
     def __init__(self, bus: Communicator, how_many_runs: int, how_many_tests: int, source_dir='new'):
         super().__init__(bus)
         self.wheels = WheelsActuator(self.bus)
-        self.lidars = VirtualSensorArray(self.bus, [LidarSensor(self.bus, ang) for ang in [17, 50, 90, 150, 210, 270, 310, 343]])
+        self.lidars = VirtualSensorArray(
+            self.bus, [LidarSensor(self.bus, ang) for ang in [17, 50, 90, 150, 210, 270, 310, 343]]
+        )
         self.camera = CameraSensor(self.bus)
-        
+
         self.max_runs = how_many_runs
         self.N_tests = how_many_tests
 
-        self.fail_buffor = []
-        self.buffor_max_len = 10 
+        self.data_buffer = []
+        self.buffer_max_len = 10
 
-        self.previous_skill = self.ExecutedSkill(None, None)
         self.current_skill = None
         self.bus.register_service('agent/ask/action', self._give_current_action)
         self.reset_requested = False
@@ -57,12 +54,11 @@ class TheAgent(Agent):
         }
 
         ### --- logging --- ###
-        
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         self.log_dir = os.path.join("logs", timestamp)
         self.continued_from = None
         resolved_source_dir = None
-        
+
         if source_dir == 'new':
             pass
         elif source_dir == 'continue':
@@ -70,7 +66,7 @@ class TheAgent(Agent):
             if resolved_source_dir:
                 self.continued_from = resolved_source_dir
             else:
-                print(f"[Agent] No previous session found. Creating new one.")
+                print("[Agent] No previous session found. Creating new one.")
         else:
             resolved_source_dir = os.path.join("logs", source_dir)
             if os.path.isdir(resolved_source_dir):
@@ -83,27 +79,25 @@ class TheAgent(Agent):
         self.stats_path = os.path.join(self.log_dir, "execution_statistics.txt")
         self.timestamps_path = os.path.join(self.log_dir, "timestamps.txt")
         self.dataset_path = os.path.join(self.log_dir, "offline_transitions.npz")
-        self.transition_records = []
+        self.test_stats_path = os.path.join(self.log_dir, "test_statistics.json")
 
-        self.skill_stats = {name: {'true_positive': 0, 'true_negative': 0, 'false_positive': 0, 'false_negative': 0} for name in self.skillset.keys()}
+        self.transition_records = []
+        self.skill_stats = {
+            name: {'true_positive': 0, 'true_negative': 0, 'false_positive': 0, 'false_negative': 0}
+            for name in self.skillset.keys()
+        }
         self.logs = []
-        self.tests = []
         self.start_time = None
         self.end_time = None
         self.run_count = 0
-        self.full_clean_run_count = 0
         self.batch_update_count = 0
         self.timestamps = []
-        self.test_stats_path = os.path.join(self.log_dir, "test_statistics.json")
-        self.test_stats_txt_path = os.path.join(self.log_dir, "test_statistics.txt")
-        self.test_step_executions = []
 
         ### --- brain --- ###
-        
         self.brain = BrainNetwork(log_dir=self.log_dir)
         self.brain.load_brain(resolved_source_dir)
         self.brain.prepare_nodes(self.skillset.keys())
-        
+
     def _give_current_action(self, request=None):
         return self.current_skill
 
@@ -113,7 +107,6 @@ class TheAgent(Agent):
             self.bus.call_service("/supervisor/do/restart")
 
     def _reset_and_restart(self):
-        self.previous_skill = self.ExecutedSkill(None, None)
         self.current_skill = None
         self.reset_requested = False
         self.bus.call_service("/supervisor/do/restart")
@@ -128,11 +121,10 @@ class TheAgent(Agent):
             except ValueError:
                 return None
 
-        valid_sessions = []
-        for entry in os.scandir(logs_root):
-            if entry.is_dir() and parse_session_timestamp(entry.name):
-                valid_sessions.append(entry.path)
-
+        valid_sessions = [
+            entry.path for entry in os.scandir(logs_root)
+            if entry.is_dir() and parse_session_timestamp(entry.name)
+        ]
         return max(valid_sessions, key=os.path.basename, default=None)
 
     def _logger(self, run):
@@ -145,19 +137,25 @@ class TheAgent(Agent):
 
                 start_str = datetime.fromtimestamp(self.start_time).strftime("%d-%m-%Y %H:%M:%S")
                 end_str = datetime.fromtimestamp(end_time).strftime("%d-%m-%Y %H:%M:%S")
-                
+
                 duration = end_time - self.start_time
                 hours, remainder = divmod(int(duration), 3600)
                 minutes, seconds = divmod(remainder, 60)
                 duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                
+
                 f.write(f"start time: {start_str} | end time: {end_str} | duration: {duration_str}\n")
-                f.write(f"runs: {run}; brain updates: {self.batch_update_count}; clean runs: {self.full_clean_run_count}\n")
-                f.write(f"{'Skill Name':<20} | {'True Positive':<15} | {'True Negative':<15} | {'false Positive':<15} | {'false Negative':<15} | {'Total':<15}\n")
+                f.write(f"runs: {run}; brain updates: {self.batch_update_count}\n")
+                f.write(f"{'Skill Name':<20} | {'True Positive':<15} | {'True Negative':<15} | {'False Positive':<15} | {'False Negative':<15} | {'Total':<15}\n")
                 f.write("-" * 100 + "\n")
                 for sk_name, counts in self.skill_stats.items():
-                    sumall = counts['true_positive'] + counts['true_negative'] + counts['false_positive'] + counts['false_negative']
-                    f.write(f"{sk_name:<20} | {counts['true_positive']:<15} | {counts['true_negative']:<15} | {counts['false_positive']:<15} | {counts['false_negative']:<15} | {sumall:<10}\n")
+                    sumall = (
+                        counts['true_positive'] + counts['true_negative'] +
+                        counts['false_positive'] + counts['false_negative']
+                    )
+                    f.write(
+                        f"{sk_name:<20} | {counts['true_positive']:<15} | {counts['true_negative']:<15} | "
+                        f"{counts['false_positive']:<15} | {counts['false_negative']:<15} | {sumall:<10}\n"
+                    )
                 f.write("-" * 100 + "\n")
                 for log in self.logs:
                     f.write(f"{log}\n")
@@ -168,10 +166,6 @@ class TheAgent(Agent):
                     f.write(f"{stmp}\n")
 
     def record_transition(self, prev_state: np.ndarray, skill_name: str, post_state: np.ndarray, succeed: bool):
-        """
-        Stores individual transition events in memory and periodically flushes 
-        them to compressed numpy archives on disk.
-        """
         self.transition_records.append({
             'prev_state': np.asarray(prev_state, dtype=np.float32),
             'skill_name': str(skill_name),
@@ -179,13 +173,11 @@ class TheAgent(Agent):
             'succeed': bool(succeed),
             'timestamp': time.time()
         })
-        
-        # Periodically dump every 50 transitions to avoid data loss on crash
+
         if len(self.transition_records) % 50 == 0:
             self.save_offline_dataset()
 
     def save_offline_dataset(self):
-        """Flushes recorded transitions to disk in compressed NPZ format."""
         if not self.transition_records:
             return
 
@@ -205,7 +197,6 @@ class TheAgent(Agent):
         )
         print(f"[Agent] Saved {len(self.transition_records)} transitions to {self.dataset_path}")
 
-
     def run(self):
         try:
             self.run_count = 0
@@ -216,20 +207,15 @@ class TheAgent(Agent):
                 self._logger(self.run_count)
                 self.run_count += 1
                 print(f"[Agent] Run {self.run_count}/{self.max_runs} ---------------")
-                if self.reset_requested: 
+                if self.reset_requested:
                     self._reset_and_restart()
 
-                state_now = self.read_state()
-                for sk in self.skillset.keys():
-                    status = self.brain.preconditions_status(sk, state_now)
-                    print(f"#################### {sk} ===> {status}")
-
                 self.bus.call_service("/supervisor/do/switchThink")
-                plan, start_skill, finish_skill = self.generate_plan(goal_skill='Finish')
+                plan = self.generate_plan(goal_skill='Finish')
                 self.bus.call_service("/supervisor/do/switchThink")
                 if len(plan) < 1:
                     print("[Agent] Returned empty plan.")
-                    self.explore() 
+                    self.explore()
                     continue
 
                 print("[Agent] Start executing plan.")
@@ -239,20 +225,15 @@ class TheAgent(Agent):
                     print(f"[Agent] Executing step {i+1}/{len(plan)}: {skill_name}")
                     state_now = self.read_state()
                     status = self.brain.preconditions_status(skill_name, state_now)
-                    if status == "FALSE": # we allow checking conflicted areas
+                    if status == "FALSE":
                         print(f"[Agent] Plan safety abort: Precondition for {skill_name} is {status}.")
                         plan_completed = False
                         break
-                    success = self.execute_skill(skill_name, self.previous_skill)
+                    success = self.execute_skill(skill_name)
                     if not success:
                         print("[Agent] Failed action. Abandoning the plan.")
                         plan_completed = False
                         break
-                    self.previous_skill.name = skill_name
-                    self.previous_skill.succeed = True
-                if start_skill == 'Start' and finish_skill == 'Finish' and plan_completed:
-                    print("[Agent] Clear Run from Start to Finish.")
-                    self.full_clean_run_count += 1
 
         except Exception as e:
             import traceback
@@ -260,47 +241,38 @@ class TheAgent(Agent):
             traceback.print_exc()
 
         finally:
-            self.brain.update(self.fail_buffor)
+            self.brain.update(self.data_buffer)
             self.end_time = time.time()
             self.brain._logger()
             self.save_offline_dataset()
             self._logger(self.run_count)
 
-    def execute_skill(self, skill_name, prev_skill: ExecutedSkill):
-        print(f"[Agent] Execute Skill")
+    def execute_skill(self, skill_name):
+        print(f"[Agent] Execute Skill: {skill_name}")
         self.current_skill = skill_name
         prev_vector_state = self.read_state()
         self.brain.create_node(skill_name)
 
-        status = self.brain.preconditions_status(skill_name, prev_vector_state)
-        preconditions_are_met = (status == "TRUE")
-        
+        preconditions_are_met = self.brain.preconditions_met(skill_name, prev_vector_state) # symbols or predicate if no symbols
+
         skill = self.skillset[skill_name]
         succeed = skill.execute()
         post_vector_state = self.read_state()
 
         self.record_transition(prev_vector_state, skill_name, post_vector_state, succeed)
-        
-        data = (prev_vector_state, skill_name, post_vector_state, succeed)
-        is_unknown = (status == "UNKNOWN")
-        is_conflicted = (status == "CONFLICT")
-        mismatch = (status == "TRUE" and not succeed) or (status == "FALSE" and succeed)
-        if is_unknown or mismatch or is_conflicted:
-            self.add_to_buffor(data)
 
-        # Confusion Matrix:
         if preconditions_are_met:
             if succeed:
                 self.skill_stats[skill_name]['true_positive'] += 1
-                self.add_to_buffor(data) # we also add true positives so the space is represented better 
             else:
-                self.skill_stats[skill_name]['false_positive'] += 1                
+                self.skill_stats[skill_name]['false_positive'] += 1
         else:
             if succeed:
                 self.skill_stats[skill_name]['false_negative'] += 1
+                self.add_to_buffer((prev_vector_state, skill_name, post_vector_state)) # we add only unpredictable succeeses
             else:
                 self.skill_stats[skill_name]['true_negative'] += 1
-        
+
         return succeed
 
     def read_state(self):
@@ -312,75 +284,63 @@ class TheAgent(Agent):
 
     def explore(self):
         print("[Agent] Explore")
-        vector_state = self.read_state()
-        unknown_skills = self.brain.get_unknown_skills(vector_state)
+        skill_name = random.choice(list(self.skillset.keys()))
 
-        if unknown_skills:
-            skill_name = random.choice(unknown_skills)
-            print(f"[Agent] Exploring UNKNOWN skill: {skill_name}")
-        else:
-            # If all regions are mapped, pick any skill whose negative GNG is not active
-            viable_skills = [
-                sk for sk in self.skillset.keys()
-                if self.brain.preconditions_status(sk, vector_state) != "FALSE"
-            ]
-            skill_name = random.choice(viable_skills) if viable_skills else random.choice(list(self.skillset.keys()))
-            print(f"[Agent] Exploring fallback viable skill: {skill_name}")
+        self.execute_skill(skill_name)
 
-        succeed = self.execute_skill(skill_name, self.previous_skill)
-        self.previous_skill = self.ExecutedSkill(skill_name, succeed)
         if self.reset_requested:
             self._reset_and_restart()
-     
-    def add_to_buffor(self, data):
-        print(f"[Agent] Add data to buffor. {len(self.fail_buffor)}/{self.buffor_max_len}")
-        if len(self.fail_buffor) >= self.buffor_max_len:
+
+    def add_to_buffer(self, data):
+        self.data_buffer.append(data)
+        self.timestamps.append(time.time())
+        print(f"[Agent] Add data to buffer. {len(self.data_buffer)}/{self.buffer_max_len}")
+        if len(self.data_buffer) >= self.buffer_max_len:
             self.bus.call_service("/supervisor/do/switchSleep")
-            self.brain.update(self.fail_buffor)
+            self.brain.update(self.data_buffer)
             self.bus.call_service("/supervisor/do/switchSleep")
             self.batch_update_count += 1
-            self.fail_buffor = []
-        self.fail_buffor.append(data)
-        self.timestamps.append(time.time())
+            self.data_buffer = []
 
-    def generate_plan(self, start_skill=None, goal_skill=None, plan_name = None):
+    def generate_plan(self, goal_skill=None, plan_name=None):
         print("[Agent] Generate Plan")
         vector_state = self.read_state()
-        if start_skill is None:
-            active_skills = self.brain.get_active_skills(vector_state)
-            if not active_skills:
-                print(f"[Agent] No active skills.")
-                return [], None, None 
-            print(f"[Agent] Active predicates: {active_skills}")
-            start_skill = random.choice(active_skills)
+
+        # 1. Check currently active symbols instead of skill preconditions
+        active_symbols = self.brain.get_active_symbols(vector_state)
+        if not active_symbols:
+            print("[Agent] No active symbols detected.")
+            return []
+        print(f"[Agent] Active symbols: {active_symbols}")
+
+        # 2. Pick a goal skill if none provided
+        nodes = self.brain.get_nodes()
+        if not nodes:
+            print("[Agent] No skill nodes available.")
+            return []
+
         if goal_skill is None:
-            nodes = self.brain.get_nodes()
-            nodes = [n for n in nodes if n != start_skill]
-            if not nodes:
-                print(f"[Agent] No nodes to choose from.")
-                return [], None, None
             goal_skill = random.choice(nodes)
 
-        print(f"[Agent] Generating plan from {start_skill} to {goal_skill}.")
-        
+        print(f"[Agent] Generating plan to achieve {goal_skill}.")
+
+        # 3. Setup PDDL directory and files
         plan_dir = os.path.join(self.pddl_dir, "task")
         os.makedirs(plan_dir, exist_ok=True)
         domain_file = os.path.join(plan_dir, "domain.pddl")
         problem_file = os.path.join(plan_dir, "problem.pddl")
         plan_file = os.path.join(plan_dir, "problem.pddl.soln")
 
+        # 4. Generate domain and problem PDDL based on the active symbols
         with open(domain_file, "w") as f:
             f.write(self.brain.generate_domain_pddl())
         with open(problem_file, "w") as f:
-            f.write(self.brain.generate_problem_pddl(vector_state, goal_skill))
-
-        if not os.path.exists(domain_file) or not os.path.exists(problem_file):
-            print(f"[Agent] Error: no .pddl files")
-            return [], None, None
+            f.write(self.brain.generate_problem_pddl(active_symbols, goal_skill))
 
         if os.path.exists(plan_file):
             os.remove(plan_file)
 
+        # 5. Run planner
         try:
             subprocess.run(
                 [sys.executable, "-m", "pyperplan", "-s", "astar", "-H", "hff", domain_file, problem_file],
@@ -388,20 +348,20 @@ class TheAgent(Agent):
                 timeout=10.0
             )
         except subprocess.TimeoutExpired:
-            print(f"[Agent] Pyperplan timed out (no plan reachable).")
-            self.logs.append(f"[Pyperplan] [RUN {self.run_count}]  Pyperplan timed out.")
-            return [], None, None
+            print("[Agent] Pyperplan timed out (no plan reachable).")
+            self.logs.append(f"[Pyperplan] [RUN {self.run_count}] Pyperplan timed out.")
+            return []
         except subprocess.CalledProcessError as e:
             print(f"[Agent] Pyperplan error: {e.stderr or e.stdout}")
-            return [], None, None
+            return []
         except Exception as e:
             print(f"[Agent] Unexpected error running Pyperplan: {e}")
-            return [], None, None
+            return []
 
         if not os.path.exists(plan_file):
-            print(f"[Agent] Pyperplan failed (no plan file).")
-            return [], None, None
-        
+            print("[Agent] Pyperplan failed (no plan file).")
+            return []
+
         self.bus.call_service("/supervisor/do/switchThink")
         executable_plan = []
         with open(plan_file, "r") as f:
@@ -411,46 +371,42 @@ class TheAgent(Agent):
                     continue
 
                 parts = line.strip("()").split()
-                if len(parts) < 1:
+                if not parts:
                     continue
 
                 action_name_lower = parts[0].lower()
-        
-                # Skip internal transition connectors
-                if action_name_lower.startswith("transition_"):
-                    continue
-
                 matched_skill = next(
-                    (sk for sk in self.skillset.keys() if action_name_lower.startswith(sk.lower())),
+                    (sk for sk in self.skillset.keys() if action_name_lower == sk.lower()),
                     None
                 )
                 if matched_skill:
                     executable_plan.append(matched_skill)
 
         if len(executable_plan) <= 0:
-            print(f"[Agent] Error: no executable plan.")
+            print("[Agent] Error: no executable plan.")
         elif len(executable_plan) > 6:
-            if plan_name is None: plan_name = f"plan_{self.run_count}"
+            if plan_name is None:
+                plan_name = f"plan_{self.run_count}"
             exec_plan_dir = os.path.join(self.pddl_dir, plan_name)
+            if os.path.exists(exec_plan_dir):
+                shutil.rmtree(exec_plan_dir)
             os.rename(plan_dir, exec_plan_dir)
 
-        return executable_plan, start_skill, goal_skill
+        return executable_plan
 
     def test_run(self):
         self.brain._logger()
-    
         self.tests_data = {}
 
         for i in range(self.N_tests):
             test_key = str(i)
             print(f"[Agent] Test {i+1}/{self.N_tests}.")
             start = time.time()
-        
+
             self.bus.call_service("/supervisor/do/restart")
             time.sleep(1.0)
-        
+
             raw_spawn = self.bus.call_service("/supervisor/ask/position")
-            # Ensure spawn_pos becomes standard floats/lists
             if hasattr(raw_spawn, "tolist"):
                 spawn_pos = raw_spawn.tolist()
             elif isinstance(raw_spawn, (list, tuple)):
@@ -459,7 +415,7 @@ class TheAgent(Agent):
                 spawn_pos = raw_spawn
 
             self.bus.call_service("/supervisor/do/switchThink")
-            plan, _, _ = self.generate_plan(goal_skill='Finish', plan_name=f"test_{i}")
+            plan = self.generate_plan(goal_skill='Finish', plan_name=f"test_{i}")
             self.bus.call_service("/supervisor/do/switchThink")
 
             test_record = {
@@ -474,16 +430,14 @@ class TheAgent(Agent):
                 "steps": []
             }
 
-            if not plan or len(plan) < 1:
-                test_record["result"] = False
-            else:
+            if plan:
                 result = True
                 print(f"[Agent] Executing plan: {plan}")
                 for step, skill_name in enumerate(plan):
                     print(f"[Agent] Executing step {step+1}/{len(plan)}: {skill_name}")
                     prev_vector_state = self.read_state()
                     preconditions_are_met = self.brain.preconditions_met(skill_name, prev_vector_state)
-                    
+
                     if not preconditions_are_met:
                         print(f"[Agent] Preconditions are not met: {skill_name}")
                         test_record["steps"].append({
@@ -495,7 +449,7 @@ class TheAgent(Agent):
                         test_record["steps_executed"] = step
                         result = False
                         break
-                    
+
                     skill = self.skillset[skill_name]
                     succeed = skill.execute()
                     test_record["last_step"] = skill_name
@@ -507,7 +461,7 @@ class TheAgent(Agent):
                         "succeed": bool(succeed),
                         "reason": "execution"
                     })
-                    
+
                     if not succeed:
                         print(f"[Agent] Skill {skill_name} failed during execution.")
                         result = False
@@ -519,12 +473,12 @@ class TheAgent(Agent):
             self.tests_data[test_key] = test_record
 
             if test_record["result"]:
-                print(f"[Agent] Test succeed.")
+                print("[Agent] Test succeed.")
             else:
-                print(f"[Agent] Test failed.")
+                print("[Agent] Test failed.")
 
         self._test_logger()
-    
+
     def _test_logger(self):
         if not self.tests_data:
             print("[Agent] No test records to log.")
@@ -537,13 +491,12 @@ class TheAgent(Agent):
         steps_executed = [t["steps_executed"] for t in tests_list]
         durations = [t["duration"] for t in tests_list]
         results = [1 if t["result"] else 0 for t in tests_list]
-    
-        # Extract bounds for successful starts
+
         successful_spawns = [
-            t["spawn_pos"] for t in tests_list 
+            t["spawn_pos"] for t in tests_list
             if t["result"] and t["spawn_pos"] is not None
         ]
-    
+
         acceptable_start_plane = None
         if successful_spawns:
             try:
@@ -562,7 +515,6 @@ class TheAgent(Agent):
             except Exception:
                 acceptable_start_plane = {"successful_positions": successful_spawns}
 
-        # Tracking Most Popular Plan Sequences
         plan_frequencies = {}
         transition_outcomes = {}
 
@@ -582,12 +534,11 @@ class TheAgent(Agent):
             for k in range(len(steps)):
                 current_sk = steps[k]["skill"]
                 succeed = steps[k]["succeed"]
-            
+
                 trans_key = f"Start -> {current_sk}" if k == 0 else f"{steps[k-1]['skill']} -> {current_sk}"
-                
                 if trans_key not in transition_outcomes:
                     transition_outcomes[trans_key] = {"attempts": 0, "failed": 0}
-            
+
                 transition_outcomes[trans_key]["attempts"] += 1
                 if not succeed:
                     transition_outcomes[trans_key]["failed"] += 1
@@ -615,7 +566,6 @@ class TheAgent(Agent):
             "tests": self.tests_data
         }
 
-        # --- Build Human-Readable Text Summary ---
         total_passed = sum(results)
         total_failed = n_tests - total_passed
         lines = [
@@ -634,7 +584,6 @@ class TheAgent(Agent):
             "",
         ]
 
-        # Spawn Bounds
         if acceptable_start_plane and "min_bounds" in acceptable_start_plane:
             min_b = [f"{b:.2f}" for b in acceptable_start_plane["min_bounds"]]
             max_b = [f"{b:.2f}" for b in acceptable_start_plane["max_bounds"]]
@@ -647,7 +596,6 @@ class TheAgent(Agent):
                 "",
             ])
 
-        # Top Plans Breakdown
         lines.extend([
             "PLAN SEQUENCES (Sorted by Frequency)",
             "-" * 40,
@@ -662,7 +610,6 @@ class TheAgent(Agent):
             lines.append("  (No plans recorded)")
         lines.append("")
 
-        # Skill Transition Reliability Breakdown
         lines.extend([
             "TRANSITION RELIABILITY (Sorted by Fail Rate)",
             "-" * 40,
@@ -685,7 +632,6 @@ class TheAgent(Agent):
 
         txt_summary = "\n".join(lines)
 
-        # --- Save JSON and TXT ---
         class NumpyEncoder(json.JSONEncoder):
             def default(self, obj):
                 if isinstance(obj, np.ndarray):
@@ -696,18 +642,13 @@ class TheAgent(Agent):
                     return bool(obj)
                 return super().default(obj)
 
-        if hasattr(self, 'test_stats_path') and self.test_stats_path:
-            # Save JSON
+        if self.test_stats_path:
             with open(self.test_stats_path, "w") as f:
                 json.dump(summary, f, indent=4, cls=NumpyEncoder)
             print(f"[Agent] Saved test data to {self.test_stats_path}")
 
-            # Save TXT (e.g., replaces .json with _summary.txt)
-            txt_path = getattr(self, 'test_summary_path', None)
-            if not txt_path:
-                base_root, _ = os.path.splitext(self.test_stats_path)
-                txt_path = f"{base_root}_summary.txt"
-
+            base_root, _ = os.path.splitext(self.test_stats_path)
+            txt_path = f"{base_root}_summary.txt"
             with open(txt_path, "w") as f:
                 f.write(txt_summary)
             print(f"[Agent] Saved readable test summary to {txt_path}")

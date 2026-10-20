@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import os
 from agent.brain_network import BrainNetwork
-from supervisor.visualize import Renderer
+from supervisor.renderer import Renderer
 
 
 class VennPic(Renderer):

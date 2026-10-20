@@ -1,24 +1,24 @@
 import os
 import re
-import json
 import time
 import numpy as np
 
 from .predicate import Predicate
+from .symbol_generator import SymbolGenerator
+
 
 class BrainNetwork:
     def __init__(self, log_dir=None):
-        self.state_dim = None 
-        # Flat dictionary mapping skill_name -> {"precondition": Predicate, "effect": Predicate}
+        self.state_dim = None
         self.skills = {}
 
         ### HYPERPARAMETERS ###
-        self.min_overlap_ratio = 0.75       # how much of the symbol's nodes have to be active to count
-        self.allowed_variancy = 0.02        # for finding invariant dimentions
+        self.min_overlap_ratio = 0.75
+        self.min_nodes = 4 
 
-        self.max_points = 20
+        self.max_points = 40
         self.base_radius = 0.1
-        self.max_radius = 8 
+        self.max_radius = 1.0
         self.learning_rate_b = 0.2
         self.learning_rate_n = 0.01
         self.max_edge_age = 15
@@ -27,31 +27,34 @@ class BrainNetwork:
         self.d = 0.99
         ### --------------- ###
 
+        self.symbol_gen = SymbolGenerator(
+            min_overlap_ratio=self.min_overlap_ratio,
+            min_nodes_in_symbol = self.min_nodes
+        )
+
         self.log_dir = log_dir
         if self.log_dir:
             self.pddl_dir = os.path.join(self.log_dir, "PDDL")
             self.gas_dir = os.path.join(self.log_dir, "PDDL", "GNG")
-            self.graphs_dir = os.path.join(self.log_dir, "graphs")
             os.makedirs(self.pddl_dir, exist_ok=True)
             os.makedirs(self.gas_dir, exist_ok=True)
-            os.makedirs(self.graphs_dir, exist_ok=True)
 
     def add_node(self, skill_name: str, precondition: Predicate, effect: Predicate):
         self.skills[skill_name] = {
             "precondition": precondition,
             "effect": effect
         }
-            
+
     def create_node(self, skill_name: str):
         if skill_name not in self.skills:
             precondition = Predicate(
-                self.max_points, self.state_dim, self.base_radius, self.max_radius, 
-                self.learning_rate_b, self.learning_rate_n, self.max_edge_age, 
+                self.max_points, self.state_dim, self.base_radius, self.max_radius,
+                self.learning_rate_b, self.learning_rate_n, self.max_edge_age,
                 self.lambda_step, self.alpha, self.d
             )
             effect = Predicate(
-                self.max_points, self.state_dim, self.base_radius, self.max_radius, 
-                self.learning_rate_b, self.learning_rate_n, self.max_edge_age, 
+                self.max_points, self.state_dim, self.base_radius, self.max_radius,
+                self.learning_rate_b, self.learning_rate_n, self.max_edge_age,
                 self.lambda_step, self.alpha, self.d
             )
             self.add_node(skill_name, precondition, effect)
@@ -60,230 +63,246 @@ class BrainNetwork:
         for skill_name in skillset:
             self.create_node(skill_name)
 
-    def preconditions_status(self, skill_name: str, state_vector) -> str:
-        """Returns 'TRUE', 'FALSE', 'UNKNOWN' or 'CONFLICT' for the skill's precondition."""
-        if skill_name not in self.skills:
-            return "UNKNOWN"
-        return self.skills[skill_name]["precondition"].evaluate(state_vector)
-
     def preconditions_met(self, skill_name: str, state_vector) -> bool:
-        """Execution check: Only execute in plans if positive is active and negative is inactive."""
-        return self.preconditions_status(skill_name, state_vector) == "TRUE"
+        """
+        Checks if all symbols in the skill's precondition are currently active in state_vector.
+        """
+        if skill_name not in self.skills:
+            return False
 
-    def get_unknown_skills(self, state_vector) -> list:
-        """Returns skills where neither positive nor negative GNG is active."""
-        unknown_skills = []
-        for name, predicates in self.skills.items():
-            if predicates["precondition"].is_unknown(state_vector):
-                unknown_skills.append(name)
-        return unknown_skills
+        sk_lower = skill_name.lower()
+        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
+        action_pre, _ = self._get_skill_symbol_interactions(symbols_map)
+
+        required_symbols = action_pre.get(sk_lower, set())
+
+        # Filter out fallback predicates to isolate abstract symbols (sym_*)
+        abstract_req_symbols = [
+            s for s in required_symbols 
+            if s in symbols_map
+        ]
+
+        #    verify that all of them are active for the current state_vector
+        if abstract_req_symbols:
+            return all(symbols_map[sym_name].is_active(state_vector) for sym_name in abstract_req_symbols)
+
+        return False
+
+    def preconditions_status(self, skill_name: str, state_vector) -> str:
+        """Returns 'TRUE' if preconditions_met is satisfied, otherwise 'FALSE'."""
+        return "TRUE" if self.preconditions_met(skill_name, state_vector) else "FALSE"
 
     def get_active_skills(self, vector) -> list:
-        """Returns skills with active positive preconditions."""
         if self.state_dim is None:
             self.state_dim = len(vector)
 
-        active_skills = []
-        for name, predicates in self.skills.items():
-            if predicates["precondition"].is_active(vector):
-                active_skills.append(name)
-        return active_skills
+        return [
+            name for name, predicates in self.skills.items()
+            if predicates["precondition"].is_active(vector)
+        ]
 
     def get_nodes(self) -> list:
         return list(self.skills.keys())
 
-    def update(self, buffor):
+    def update(self, buffer):
+        if not buffer:
+            return
         print("\t[Brain] Updating Predicates (GNG)")
-        for data in buffor:
-            pre_vector_state, skill_name, post_vector_state, succeed = data
-        
+        for pre_vector_state, skill_name, post_vector_state in buffer:
             if self.state_dim is None:
                 self.state_dim = len(pre_vector_state)
 
             if skill_name not in self.skills:
                 self.create_node(skill_name)
 
-            self.skills[skill_name]["precondition"].update(pre_vector_state, succeed)
-            if succeed:
-                self.skills[skill_name]["effect"].update(post_vector_state, True)
+            self.symbol_gen.update_bounds([pre_vector_state, post_vector_state])
+            self.skills[skill_name]["precondition"].update(pre_vector_state)
+            self.skills[skill_name]["effect"].update(post_vector_state)
 
-        self.update_allowed_variance()
+        self.abstract_symbols()
         self._logger()
 
-    @staticmethod
-    def _otsu_variance_threshold(variances: np.ndarray, fallback: float = 0.1) -> float:
-        """Finds the variance threshold minimizing intra-class variance between invariant vs changing dims."""
-        # Filter out negligible/numerical zeros
-        valid_variances = variances[variances > 1e-7]
-        if len(valid_variances) < 2:
-            return fallback
+    def abstract_symbols(self) -> dict:
+        """Generates symbols for each skill and aggregates them into minimal sym_i predicates."""
+        raw_symbols = []
+        for skill_data in self.skills.values():
+            raw_symbols.extend(self.symbol_gen.generate_symbols(skill_data))
+        return self.symbol_gen.agregate_symbols(raw_symbols)
 
-        sorted_vars = np.sort(valid_variances)
-        n = len(sorted_vars)
-        best_thresh = sorted_vars[0]
-        best_intra_variance = float("inf")
-
-        for i in range(1, n):
-            w0 = i / n
-            w1 = 1.0 - w0
-            c0, c1 = sorted_vars[:i], sorted_vars[i:]
-            
-            # Weighted sum of intra-class variances
-            intra_variance = w0 * np.var(c0) + w1 * np.var(c1)
-            if intra_variance < best_intra_variance:
-                best_intra_variance = intra_variance
-                best_thresh = sorted_vars[i]
-
-        return float(best_thresh)
-
-    def update_allowed_variance(self):
+    def get_active_symbols(self, vector) -> list:
         """
-        Collects dimension variances across all learned skill predicates (precondition & effect)
-        and updates self.allowed_variancy dynamically using Otsu's method.
+        Returns active symbols (sym_0, sym_1, ...).
         """
-        collected_variances = []
+        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
+        if symbols_map:
+            return [sym_name for sym_name, pred in symbols_map.items() if pred.is_active(vector)]
 
-        for skill in self.skills.values():
-            for phase in ("precondition", "effect"):
-                pred = skill[phase]
-                if pred.nodes and len(pred.nodes) >= 2:
-                    nodes_mat = np.asarray(pred.nodes, dtype=float)
-                    # Variance along each dimension for this predicate
-                    dim_variances = np.var(nodes_mat, axis=0)
-                    collected_variances.extend(dim_variances.tolist())
+        return []
 
-        if collected_variances:
-            var_array = np.array(collected_variances, dtype=float)
-            self.allowed_variancy = self._otsu_variance_threshold(
-                var_array, fallback=self.allowed_variancy
-            )
-
-    def invariant_mask(self, predicate: Predicate) -> np.ndarray:
+    def _get_skill_symbol_interactions(self, symbols_map: dict):
         """
-        Returns a boolean mask (np.ndarray of bools), where True indicates an invariant dimension.
-        Considers only those nodes belonging to the 'true' GNG (gng_pos).
+        Specifies active symbols before and after execution of each action.
         """
-        if not predicate or not predicate.nodes:
-            if self.state_dim is not None:
-                return np.zeros(self.state_dim, dtype=bool)
-            return np.array([], dtype=bool)
+        action_pre = {}
+        action_eff = {}
 
-        nodes_mat = np.asarray(predicate.nodes, dtype=float)
-        if len(nodes_mat) < 2:
-            return np.ones(nodes_mat.shape[1], dtype=bool)
+        for skill_name, skill_data in self.skills.items():
+            sk_lower = skill_name.lower()
+            action_pre[sk_lower] = set()
+            action_eff[sk_lower] = set()
 
-        variances = np.var(nodes_mat, axis=0)
-        return variances < self.allowed_variancy
-    
-    def action_mask(self, skill_name: str) -> np.ndarray:
+            pre_pred = skill_data["precondition"]
+            eff_pred = skill_data["effect"]
+            pre_pts = pre_pred.nodes
+            eff_pts = eff_pred.nodes
+
+            for sym_name, sym_pred in symbols_map.items():
+                if pre_pts:
+                    active_cnt = sum(
+                        1 for pt in pre_pts
+                        if sym_pred.is_active(pt, vector_dims=pre_pred.active_dimentions)
+                    )
+                    if (active_cnt / len(pre_pts)) >= self.min_overlap_ratio:
+                        action_pre[sk_lower].add(sym_name)
+
+                if eff_pts:
+                    active_cnt = sum(
+                        1 for pt in eff_pts
+                        if sym_pred.is_active(pt, vector_dims=eff_pred.active_dimentions)
+                    )
+                    if (active_cnt / len(eff_pts)) >= self.min_overlap_ratio:
+                        action_eff[sk_lower].add(sym_name)
+
+        return action_pre, action_eff
+
+    def generate_domain_pddl(self, domain_name="robot_domain") -> str:
         """
-        It identifies 'variants' – a mask of dimensions that have changed between the initial condition (precondition) and the final condition (effect) for dimensions that are otherwise invariants.
+        Generates a PDDL domain file strictly formatted for pyperplan.
+        Ensures all possible goal/action predicates are declared in (:predicates ...).
         """
-        skill = self.skills.get(skill_name)
-        if not skill:
-            return np.zeros(self.state_dim or 0, dtype=bool)
+        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
+        action_pre, action_eff = self._get_skill_symbol_interactions(symbols_map)
 
-        pre_pred = skill["precondition"]
-        eff_pred = skill["effect"]
+        all_predicates = set(symbols_map.keys())
+        for preds in action_pre.values():
+            all_predicates.update(preds)
+        for preds in action_eff.values():
+            all_predicates.update(preds)
 
-        if not pre_pred.nodes or not eff_pred.nodes:
-            return np.zeros(self.state_dim or 0, dtype=bool)
+        pddl = [
+            f"(define (domain {domain_name})",
+            "  (:requirements :strips)",
+            "  (:predicates"
+        ]
+        for pred in sorted(all_predicates):
+            pddl.append(f"    ({pred})")
+        pddl.append("  )")
 
-        mask_pre = self.invariant_mask(pre_pred)
-        mask_eff = self.invariant_mask(eff_pred)
-        candidate_dims = mask_pre | mask_eff
+        for skill_name in sorted(self.skills.keys()):
+            sk_lower = skill_name.lower()
+            pre_conditions = action_pre.get(sk_lower, set())
+            eff_conditions = action_eff.get(sk_lower, set())
 
-        mean_pre = np.mean(pre_pred.nodes, axis=0)
-        mean_eff = np.mean(eff_pred.nodes, axis=0)
+            # Fallback if an action has no symbol interactions mapped yet
+            if not pre_conditions:
+                continue
+            if not eff_conditions:
+                continue
 
-        # A change in a dimension value that exceeds the variance tolerance threshold
-        diff = np.abs(mean_pre - mean_eff)
-        threshold = np.sqrt(self.allowed_variancy)
+            adds = set(eff_conditions)
+            dels = set(pre_conditions - eff_conditions)
 
-        return candidate_dims & (diff >= threshold)
+            # Precondition: CNF compliant
+            pre_body = f"(and {' '.join(f'({p})' for p in sorted(pre_conditions))})"
 
-    def group_symbols(self, symbols: dict) -> dict:
+            # Effect: CNF compliant
+            eff_tokens = [f"({a})" for a in sorted(adds)]
+            eff_tokens.extend([f"(not ({d}))" for d in sorted(dels)])
+            eff_body = f"(and {' '.join(eff_tokens)})"
+
+            pddl.extend([
+                "",
+                f"  (:action {sk_lower}",
+                "    :parameters ()",
+                f"    :precondition {pre_body}",
+                f"    :effect {eff_body}",
+                "  )"
+            ])
+
+        pddl.append(")")
+        return "\n".join(pddl)
+
+    def generate_problem_pddl(self, active_symbols, goal_skill: str,
+                              problem_name="plan_problem", domain_name="robot_domain") -> str:
         """
-        It verifies the coverage relationships between symbols and reduces them to independent elements.
-        Input and output structure: {skill_name: {'precondition': [gngs], 'effect': [gngs]}}
+        Generates a PDDL problem file formatted for pyperplan.
+        Guarantees that all init and goal predicates exist in the domain.
         """
-        grouped = {}
-        for skill_name, phases in symbols.items():
-            grouped[skill_name] = {}
-            for phase, pred_list in phases.items():
-                if len(pred_list) <= 1:
-                    grouped[skill_name][phase] = list(pred_list)
-                    continue
+        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
+        action_pre, _ = self._get_skill_symbol_interactions(symbols_map)
 
-                reduced_preds = []
-                for i, sym_a in enumerate(pred_list):
-                    others = [sym for j, sym in enumerate(pred_list) if i != j]
-                    # If the symbol a is entirely covered by the union of the remaining symbols, we replace it
-                    if others and sym_a.is_covered_by(others):
-                        continue
-                    reduced_preds.append(sym_a)
+        init_predicates = set(active_symbols)
 
-                grouped[skill_name][phase] = reduced_preds if reduced_preds else pred_list
-        return grouped
+        goal_lower = goal_skill.lower()
+        goal_predicates = set(action_pre.get(goal_lower, set()))
 
-    def abstract_symbols(self)-> dict:
-        """
-        1) Identifies invariants for `init` and `eff`.
-        2) Checks the dimensions of actions that undergo changes.
-        3) Groups the data and creates a map: `{skill_name: {'precondition': [gngs], 'effect': [gngs]}}`.
-        """
-        raw_symbols = {}
-        for skill_name in self.skills.keys():
-            raw_symbols[skill_name] = {
-                "precondition": [self.skills[skill_name]["precondition"]],
-                "effect": [self.skills[skill_name]["effect"]]
-            }
+        if not goal_predicates:
+            return ""
 
-        return self.group_symbols(raw_symbols)
+        pddl = [
+            f"(define (problem {problem_name})",
+            f"  (:domain {domain_name})",
+            "  (:init"
+        ]
+        for pred in sorted(init_predicates):
+            pddl.append(f"    ({pred})")
+        pddl.append("  )")
 
-    def export_dimension_statistics(self, file_path=None):
-        """
-        Exports dimension invariant and transition analysis to a formatted text file in English.
-        Covers invariant dimensions in precondition, invariant dimensions in effect,
-        and dimensions that changed during action execution.
-        """
+        pddl.append("  (:goal")
+        goals_str = " ".join(f"({g})" for g in sorted(goal_predicates))
+        pddl.append(f"    (and {goals_str})")
+        pddl.append("  )")
+        pddl.append(")")
+
+        return "\n".join(pddl)
+
+    def export_symbol_statistics(self, file_path=None):
+        """Exports active dimensions and node counts of aggregated symbols and skills."""
         if not self.log_dir and file_path is None:
             return
 
         if file_path is None:
-            file_path = os.path.join(self.log_dir, "dimension_statistics.txt")
+            file_path = os.path.join(self.log_dir, "symbol_statistics.txt")
 
         os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        symbols_map = self.symbol_gen.symbols
+        action_pre, action_eff = self._get_skill_symbol_interactions(symbols_map)
 
         lines = [
             "=" * 70,
-            "SKILL DIMENSION INVARIANT & TRANSITION STATISTICS",
+            "SYMBOL & SKILL ABSTRACTION STATISTICS",
             "=" * 70,
             f"State Dimension: {self.state_dim}",
-            f"Allowed Variance Threshold: {self.allowed_variancy}",
+            f"Total Aggregated Symbols: {len(symbols_map)}",
             "-" * 70,
-            ""
+            "SYMBOLS:"
         ]
 
+        for sym_name in sorted(symbols_map.keys()):
+            pred = symbols_map[sym_name]
+            lines.append(
+                f"  {sym_name:<10} | dims: {pred.active_dimentions} | nodes: {len(pred.nodes)}"
+            )
+
+        lines.append("-" * 70)
+        lines.append("SKILL INTERACTIONS:")
         for skill_name in sorted(self.skills.keys()):
-            skill = self.skills[skill_name]
-            pre_pred = skill["precondition"]
-            eff_pred = skill["effect"]
-
-            # Compute invariant masks (boolean arrays)
-            pre_inv_mask = self.invariant_mask(pre_pred)
-            eff_inv_mask = self.invariant_mask(eff_pred)
-            act_changed_mask = self.action_mask(skill_name)
-
-            # Convert boolean masks to list of dimension indices
-            pre_invariant_dims = np.where(pre_inv_mask)[0].tolist()
-            eff_invariant_dims = np.where(eff_inv_mask)[0].tolist()
-            changed_dims = np.where(act_changed_mask)[0].tolist()
-
+            sk_lower = skill_name.lower()
+            pre_syms = sorted(action_pre.get(sk_lower, set()))
+            eff_syms = sorted(action_eff.get(sk_lower, set()))
             lines.append(f"Skill: {skill_name}")
-            lines.append(f"  - Precondition Invariant Dimensions : {pre_invariant_dims}")
-            lines.append(f"  - Effect Invariant Dimensions       : {eff_invariant_dims}")
-            lines.append(f"  - Changed Dimensions (Action Mask)  : {changed_dims}")
+            lines.append(f"  - Precondition Symbols : {pre_syms}")
+            lines.append(f"  - Effect Symbols       : {eff_syms}")
             lines.append("-" * 70)
 
         temp_file = f"{file_path}.tmp"
@@ -296,336 +315,50 @@ class BrainNetwork:
                 break
             except (PermissionError, OSError):
                 time.sleep(0.05)
-        else:
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except OSError:
-                    pass
 
     def save_abstract_symbols(self):
         """
-        Saves all reduced abstract symbols to JSON files and exports
-        dimension statistics to a text report file.
+        Saves all aggregated symbols (sym_0, sym_1, ...) as Predicate JSON files.
+        Deletes old symbol files from disk that are no longer part of the current active symbols.
         """
         if not self.log_dir:
             return
 
         os.makedirs(self.gas_dir, exist_ok=True)
 
-        # 1. Clean previous abstract symbol files
+        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
+        active_filenames = {f"{sym_name}.json" for sym_name in symbols_map.keys()}
+
+        # 1. Scan and delete old symbol files not present in the current symbols_map
         for fname in os.listdir(self.gas_dir):
-            if fname.endswith("_abs.json"):
+            is_symbol_file = (
+                re.match(r"^sym_\d+\.(json|tmp)$", fname) is not None
+            )
+            if is_symbol_file and fname not in active_filenames:
                 try:
                     os.remove(os.path.join(self.gas_dir, fname))
                 except OSError:
                     pass
 
-        # 2. Extract and serialize reduced abstract symbols
-        abstract_map = self.abstract_symbols()
-        for skill_name, phases in abstract_map.items():
-            for phase, pred_list in phases.items():
-                for idx, predicate in enumerate(pred_list):
-                    suffix = f"_{idx}" if len(pred_list) > 1 else ""
-                    symbol_identifier = f"{skill_name}_{phase}{suffix}"
-                    self.save_predicate(symbol_identifier, predicate, pred_type='abs')
+        # 2. Save only the current, active symbols
+        for sym_name, predicate in symbols_map.items():
+            predicate.save_predicate(self.gas_dir, sym_name)
 
-        # 3. Export dimension statistics report
-        self.export_dimension_statistics()
-
-    def _get_active_abstract_symbols(self, vector, abstract_map: dict) -> set:
-        """Returns a set of active symbols in the format <skill_name>_<precondition/effect> for a given state vector."""
-        active_set = set()
-        for sk_name, phases in abstract_map.items():
-            for phase in ("precondition", "effect"):
-                sym_name = f"{sk_name.lower()}_{phase}"
-                for pred in phases.get(phase, []):
-                    if pred.is_active(vector):
-                        active_set.add(sym_name)
-                        break
-        return active_set
-
-    def _get_skill_abstract_interactions(self, abstract_map: dict, min_ratio=None):
-        """
-        It specifies which abstract symbols are active in the states before and after the execution of each action.
-        """
-        if min_ratio is None:
-            min_ratio = self.min_overlap_ratio
-
-        action_pre = {}
-        action_eff = {}
-
-        for skill_name, skill_data in self.skills.items():
-            sk_lower = skill_name.lower()
-            action_pre[sk_lower] = set()
-            action_eff[sk_lower] = set()
-
-            # Custom action symbols are always active
-            action_pre[sk_lower].add(f"{sk_lower}_precondition")
-            action_eff[sk_lower].add(f"{sk_lower}_effect")
-
-            pre_pts = skill_data["precondition"].nodes
-            eff_pts = skill_data["effect"].nodes
-
-            # Checking for correlation with symbols of other skills
-            for other_name, phases in abstract_map.items():
-                oth_lower = other_name.lower()
-                for phase in ("precondition", "effect"):
-                    sym_label = f"{oth_lower}_{phase}"
-                    preds = phases.get(phase, [])
-                    if not preds:
-                        continue
-
-                    # Precondition
-                    if pre_pts:
-                        active_cnt = sum(
-                            1 for pt in pre_pts if any(p.is_acceptable(pt) for p in preds)
-                        )
-                        if (active_cnt / len(pre_pts)) >= min_ratio:
-                            action_pre[sk_lower].add(sym_label)
-
-                    # Effect
-                    if eff_pts:
-                        active_cnt = sum(
-                            1 for pt in eff_pts if any(p.is_acceptable(pt) for p in preds)
-                        )
-                        if (active_cnt / len(eff_pts)) >= min_ratio:
-                            action_eff[sk_lower].add(sym_label)
-
-        return action_pre, action_eff
-
-    def generate_domain_pddl(self, domain_name="robot_domain") -> str:
-        """
-        Generates a PDDL domain based on abstract symbols: <skill_name>_<precondition/effect>.
-        """
-        pddl = [
-            f"(define (domain {domain_name})",
-            "  (:requirements :strips)",
-            "  (:predicates"
-        ]
-
-        abstract_map = self.abstract_symbols()
-        action_pre, action_eff = self._get_skill_abstract_interactions(abstract_map)
-
-        all_predicates = set()
-        for preds in action_pre.values():
-            all_predicates.update(preds)
-        for preds in action_eff.values():
-            all_predicates.update(preds)
-
-        for pred in sorted(all_predicates):
-            pddl.append(f"    ({pred})")
-        pddl.append("  )")
-
-        def format_effect(adds, deletes):
-            effects = [f"({a})" for a in sorted(adds)]
-            effects.extend([f"(not ({d}))" for d in sorted(deletes)])
-            if len(effects) == 1:
-                return effects[0]
-            return f"(and {' '.join(effects)})"
-
-        for skill_name in sorted(self.skills.keys()):
-            sk_lower = skill_name.lower()
-            pre_conditions = action_pre.get(sk_lower, set())
-            eff_conditions = action_eff.get(sk_lower, set())
-
-            # adds i deletes
-            adds = eff_conditions
-            dels = {f"{sk_lower}_precondition"} | (pre_conditions - eff_conditions)
-
-            pre_str = " ".join(f"({p})" for p in sorted(pre_conditions))
-
-            pddl.extend([
-                "",
-                f"  (:action {sk_lower}",
-                "    :parameters ()",
-                f"    :precondition (and {pre_str})",
-                f"    :effect {format_effect(adds, dels)}",
-                "  )"
-            ])
-
-        pddl.append(")")
-        return "\n".join(pddl)
-
-    def generate_problem_pddl(self, current_vector, goal_skill: str, start_skill: str = None, 
-                              problem_name="plan_problem", domain_name="robot_domain") -> str:
-        """
-        Generates a PDDL problem. The goal is a conjunction of symbols that are active before the execution of `goal_skill`.
-        """
-        abstract_map = self.abstract_symbols()
-        action_pre, _ = self._get_skill_abstract_interactions(abstract_map)
-
-        # 1.initial state (:init)
-        init_predicates = set()
-        if start_skill:
-            start_lower = start_skill.lower()
-            init_predicates.update(action_pre.get(start_lower, {f"{start_lower}_precondition"}))
-        else:
-            init_predicates = self._get_active_abstract_symbols(current_vector, abstract_map)
-
-        # 2. (:goal) - conjunction of active symbols before execution of goal_skill
-        goal_lower = goal_skill.lower()
-        goal_predicates = action_pre.get(goal_lower, {f"{goal_lower}_precondition"})
-
-        pddl = [
-            f"(define (problem {problem_name})",
-            f"  (:domain {domain_name})",
-            "  (:init"
-        ]
-        for pred in sorted(init_predicates):
-            pddl.append(f"    ({pred})")
-        pddl.append("  )")
-
-        pddl.append("  (:goal")
-        if len(goal_predicates) > 1:
-            goals_str = " ".join(f"({g})" for g in sorted(goal_predicates))
-            pddl.append(f"    (and {goals_str})")
-        elif len(goal_predicates) == 1:
-            pddl.append(f"    ({next(iter(goal_predicates))})")
-        else:
-            pddl.append(f"    ({goal_lower}_precondition)")
-        pddl.append("  )")
-        pddl.append(")")
-
-        return "\n".join(pddl)
-
+        # 3. Export symbol report reflecting only active symbols
+        self.export_symbol_statistics()
 
     def _logger(self):
         if not self.log_dir:
             return
 
-        # Save all skill predicates
         for skill_name, predicates in self.skills.items():
-            self.save_predicate(skill_name, predicates["precondition"], 'init')
-            self.save_predicate(skill_name, predicates["effect"], 'eff')
+            predicates["precondition"].save_predicate(self.gas_dir, f"{skill_name}_init")
+            predicates["effect"].save_predicate(self.gas_dir, f"{skill_name}_eff")
 
-        # Save abstract symbols:
         self.save_abstract_symbols()
 
-    @staticmethod
-    def _serialize_single_gng(gng_obj) -> dict:
-        parameters = {
-            "max_points": gng_obj.max_points,
-            "base_radius": gng_obj.base_radius,
-            "max_radius": gng_obj.max_radius,
-            "learning_rate_b": gng_obj.eb,
-            "learning_rate_n": gng_obj.en,
-            "max_edge_age": gng_obj.max_age,
-            "lambda_step": gng_obj.lambda_step,
-            "alpha": gng_obj.alpha,
-            "d": gng_obj.d,
-        }
-        edges_str_keys = {f"{u},{v}": age for (u, v), age in gng_obj.edges.items()}
-        radii = [float(gng_obj._get_local_radius(i)) for i in range(len(gng_obj.nodes))]
-
-        return {
-            "parameters": parameters,
-            "nodes": [n.tolist() for n in gng_obj.nodes],
-            "edges": edges_str_keys,
-            "local_radii": radii
-        }
-
-    @staticmethod
-    def _deserialize_single_gng(gng_obj, data: dict):
-        if not data:
-            return
-
-        params = data.get("parameters", {})
-        gng_obj.max_points = params.get("max_points", gng_obj.max_points)
-        gng_obj.base_radius = params.get("base_radius", gng_obj.base_radius)
-        gng_obj.max_radius = params.get("max_radius", gng_obj.max_radius)
-        gng_obj.eb = params.get("learning_rate_b", gng_obj.eb)
-        gng_obj.en = params.get("learning_rate_n", gng_obj.en)
-        gng_obj.max_age = params.get("max_edge_age", gng_obj.max_age)
-        gng_obj.lambda_step = params.get("lambda_step", gng_obj.lambda_step)
-        gng_obj.alpha = params.get("alpha", gng_obj.alpha)
-        gng_obj.d = params.get("d", gng_obj.d)
-
-        if "nodes" in data:
-            gng_obj.nodes = [np.array(n, dtype=float) for n in data["nodes"]]
-            gng_obj.errors = [0.0] * len(gng_obj.nodes)
-
-        if "local_radii" in data:
-            gng_obj.cached_radii = data["local_radii"]
-
-        if "edges" in data:
-            parsed_edges = {}
-            for k, v in data["edges"].items():
-                u, v_node = map(int, k.split(","))
-                parsed_edges[(u, v_node)] = v
-            gng_obj.edges = parsed_edges
-
-            gng_obj.adj = {}
-            for (u, v) in gng_obj.edges.keys():
-                gng_obj.adj.setdefault(u, set()).add(v)
-                gng_obj.adj.setdefault(v, set()).add(u)
-
-    def save_predicate(self, skill_name: str, predicate: Predicate, pred_type: str):
-        if not self.log_dir or predicate is None or pred_type not in ['init', 'eff', 'pass', 'abs']:
-            return
-
-        os.makedirs(self.gas_dir, exist_ok=True)
-
-        data = {
-            "version": "3_val_logic",
-            "gng_pos": self._serialize_single_gng(predicate.gng_pos),
-            "gng_neg": self._serialize_single_gng(predicate.gng_neg)
-        }
-
-        file_path = os.path.join(self.gas_dir, f"{skill_name}_{pred_type}.json")
-        temp_file = os.path.join(self.gas_dir, f"{skill_name}_{pred_type}.tmp")
-
-        with open(temp_file, "w") as f:
-            json.dump(data, f)
-
-        for _ in range(5):
-            try:
-                os.replace(temp_file, file_path)
-                break
-            except (PermissionError, OSError):
-                time.sleep(0.05)
-        else:
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except OSError:
-                    pass
-
-    @classmethod
-    def load_predicate(cls, file_path) -> Predicate:
-        with open(file_path, "r") as f:
-            data = json.load(f)
-
-        if data.get("version") == "3_val_logic":
-            pos_data = data.get("gng_pos", {})
-            neg_data = data.get("gng_neg", {})
-            params = pos_data.get("parameters", {})
-        else:
-            pos_data = data
-            neg_data = None
-            params = data.get("parameters", {})
-
-        pred = Predicate(
-            max_points=params.get("max_points", 85),
-            dim=None,
-            base_radius=params.get("base_radius", 0.15),
-            max_radius=params.get("max_radius", 1.75),
-            learning_rate_b=params.get("learning_rate_b", 0.2),
-            learning_rate_n=params.get("learning_rate_n", 0.01),
-            max_edge_age=params.get("max_edge_age", 24),
-            lambda_step=params.get("lambda_step", 5),
-            alpha=params.get("alpha", 0.7),
-            d=params.get("d", 0.99)
-        )
-
-        cls._deserialize_single_gng(pred.gng_pos, pos_data)
-        if neg_data:
-            cls._deserialize_single_gng(pred.gng_neg, neg_data)
-
-        return pred
-
     def load_brain(self, source_dir):
-        """Loads node predicates directly from disk into the skills dictionary."""
+        """Loads skill predicates and abstract symbols from disk using Predicate.load_predicate."""
         print("\t[Brain] Loading brain from files.")
         if source_dir is None or not os.path.isdir(source_dir):
             print("\t[Brain] Invalid source directory.")
@@ -636,7 +369,6 @@ class BrainNetwork:
             print(f"\t[Brain] Could not find GNG directory: {src_gas_dir}")
             return
 
-        # Find all skills by scanning for *_init.json files
         skill_names = set()
         for filename in os.listdir(src_gas_dir):
             match = re.match(r"^(.*)_init\.json$", filename)
@@ -648,10 +380,29 @@ class BrainNetwork:
             eff_file = os.path.join(src_gas_dir, f"{name}_eff.json")
 
             if os.path.exists(pre_file) and os.path.exists(eff_file):
-                precondition = self.load_predicate(pre_file)
-                effect = self.load_predicate(eff_file)
+                precondition = Predicate(self.max_points).load_predicate(pre_file)
+                effect = Predicate(self.max_points).load_predicate(eff_file)
                 self.add_node(name, precondition, effect)
-                if self.state_dim is None and hasattr(precondition, "gng_pos") and precondition.gng_pos.nodes:
-                    self.state_dim = len(precondition.gng_pos.nodes[0])
+
+                if self.state_dim is None and precondition.nodes:
+                    self.state_dim = len(precondition.nodes[0])
+                if precondition.nodes:
+                    self.symbol_gen.update_bounds(precondition.nodes)
+                if effect.nodes:
+                    self.symbol_gen.update_bounds(effect.nodes)
             else:
                 print(f"\t[Brain] Incomplete predicates for skill '{name}', skipping.")
+
+        # Load saved sym_i predicates if present, otherwise regenerate
+        loaded_symbols = {}
+        for filename in os.listdir(src_gas_dir):
+            match = re.match(r"^(sym_\d+)\.json$", filename)
+            if match:
+                sym_name = match.group(1)
+                sym_file = os.path.join(src_gas_dir, filename)
+                loaded_symbols[sym_name] = Predicate(self.max_points).load_predicate(sym_file)
+
+        if loaded_symbols:
+            self.symbol_gen.symbols = loaded_symbols
+        elif self.skills:
+            self.abstract_symbols()
