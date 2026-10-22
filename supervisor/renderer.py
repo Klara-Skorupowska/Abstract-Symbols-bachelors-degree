@@ -8,6 +8,7 @@ SKILL_ORDER = [
     "Start", "Find_The_Door", "Go_To_The_Door", "Open_The_Door",
     "Find_The_Goal", "Go_To_The_Goal", "Finish"
 ]
+SKILL_ORDER = [skill.lower() for skill in SKILL_ORDER]
 
 def lower_median(arr, axis=None):
     """Computes the lower median: for even n, takes the smaller middle value rather than the mean."""
@@ -61,23 +62,31 @@ class Renderer:
         cmin = np.minimum(np.minimum(r, g), b)
         delta = cmax - cmin
 
-        h = np.zeros_like(r)
-        nonzero = delta > 1e-6
+        # Saturation & Value/Brightness calculations
+        v = cmax
+        s = np.zeros_like(v)
+        nonzero_v = v > 1e-6
+        s[nonzero_v] = delta[nonzero_v] / v[nonzero_v]
 
-        mask = nonzero & (cmax == r)
+        # Hue calculation
+        h = np.zeros_like(r)
+        nonzero_delta = delta > 1e-6
+
+        mask = nonzero_delta & (cmax == r)
         h[mask] = (60.0 * (((g[mask] - b[mask]) / delta[mask]) % 6))
 
-        mask = nonzero & (cmax == g)
+        mask = nonzero_delta & (cmax == g)
         h[mask] = (60.0 * (((b[mask] - r[mask]) / delta[mask]) + 2))
 
-        mask = nonzero & (cmax == b)
+        mask = nonzero_delta & (cmax == b)
         h[mask] = (60.0 * (((r[mask] - g[mask]) / delta[mask]) + 4))
 
+        # Circular statistics for Hue
         angles = np.deg2rad(h)
         sin_mean = np.mean(np.sin(angles))
         cos_mean = np.mean(np.cos(angles))
         R = np.hypot(sin_mean, cos_mean)
-        circ_var = 1.0 - R
+        circ_var = float(1.0 - R)
 
         mean_angle = np.arctan2(sin_mean, cos_mean)
         diff_angles = np.arctan2(np.sin(angles - mean_angle), np.cos(angles - mean_angle))
@@ -86,7 +95,16 @@ class Renderer:
         median_angle = (mean_angle + median_diff + 2 * np.pi) % (2 * np.pi)
         median_angle_deg = np.rad2deg(median_angle)
 
-        hsv_pixel = np.uint8([[[int(median_angle_deg / 2.0), 255, 255]]])
+        # Compute representative median Saturation and Value
+        median_s = float(lower_median(s))
+        median_v = float(lower_median(v))
+
+        # Map to OpenCV HSV 8-bit scales: H in [0, 179], S in [0, 255], V in [0, 255]
+        h_cv = int(np.clip(median_angle_deg / 2.0, 0, 179))
+        s_cv = int(np.clip(median_s * 255.0, 0, 255))
+        v_cv = int(np.clip(median_v * 255.0, 0, 255))
+
+        hsv_pixel = np.uint8([[[h_cv, s_cv, v_cv]]])
         bgr_pixel = cv2.cvtColor(hsv_pixel, cv2.COLOR_HSV2BGR)[0][0]
         median_bgr = (int(bgr_pixel[0]), int(bgr_pixel[1]), int(bgr_pixel[2]))
 
@@ -270,7 +288,9 @@ class Renderer:
             cv2.putText(img, "No graph data", (400, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, self.neutral_gray, 2)
             return
 
-        ordered_nodes = [n for n in SKILL_ORDER if n in nodes]
+        # Ensure lowercase skill order matches lowercase node names
+        order_lower = [s.lower() for s in SKILL_ORDER]
+        ordered_nodes = [n for n in order_lower if n in nodes]
         for n in nodes:
             if n not in ordered_nodes:
                 ordered_nodes.append(n)
@@ -309,9 +329,13 @@ class Renderer:
             idx_src = node_indices[source]
             idx_tgt = node_indices[target]
 
-            t = max(0.0, min(1.0, (weight - min_weight) / (max_weight - min_weight))) if max_weight != min_weight else 1.0
-            faint_color = tuple(int(0.85 * bg + 0.15 * pri) for bg, pri in zip(self.BG_COLOR, self.primary_color))
-            edge_color = tuple(int((1.0 - t) * faint_color[c] + t * self.primary_color[c]) for c in range(3))
+            # Green for 1.0 connections, default palette for others
+            if weight >= 1.0:
+                edge_color = self.status_green
+            else:
+                t = max(0.0, min(1.0, (weight - min_weight) / (max_weight - min_weight))) if max_weight != min_weight else 1.0
+                faint_color = tuple(int(0.85 * bg + 0.15 * pri) for bg, pri in zip(self.BG_COLOR, self.primary_color))
+                edge_color = tuple(int((1.0 - t) * faint_color[c] + t * self.primary_color[c]) for c in range(3))
 
             if source == target:
                 P1 = np.array([pt1[0] - 12.0, pt1[1] - node_radius], dtype=float)
@@ -360,7 +384,7 @@ class Renderer:
             cv2.circle(img, (x, y), node_radius, self.tertiary_color, -1)
             cv2.circle(img, (x, y), node_radius, self.primary_color, 2)
 
-            display_name = node.replace("_", " ")
+            display_name = node.replace("_", " ").title()
             wrapped_lines = textwrap.wrap(display_name, width=9)
 
             font = cv2.FONT_HERSHEY_SIMPLEX

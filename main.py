@@ -37,7 +37,7 @@ def save_session_info(
     hyperparams = {
         "min_overlap_ratio": getattr(brain, "min_overlap_ratio", '?'),
         "min_nodes_in_symbol": getattr(brain, "min_nodes", '?'),
-        "allowed_variancy": getattr(brain, "allowed_variancy", '?'),
+        "span_tolerance": getattr(brain, "span_tolerance", '?'),
         "max_points": getattr(brain, "max_points", '?'),
         "base_radius": getattr(brain, "base_radius", '?'),
         "max_radius": getattr(brain, "max_radius", '?'),
@@ -215,9 +215,8 @@ def run_til_success(session_dir, runs, tests, time_limit = 2, max_sessions = 4, 
     
     # Store initial chosen session directory before loops switch to 'continue'
     initial_chosen_dir = session_dir
-
     while time.time() - start_time < time_limit * 3600:
-        if retries > max_sessions:
+        if retries >= max_sessions:
             break
         retries += 1
 
@@ -243,15 +242,21 @@ def run_til_success(session_dir, runs, tests, time_limit = 2, max_sessions = 4, 
     duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     mssg = f"After {retries} attemps ({sum_runs} runs) program achieved success rate of {get_success_rate(tests_file_path):.2f}. Work time: {duration_str}. Initial dir: {initial_chosen_dir}\n"
     append_text_to_file(stats_file_path, mssg)
+    return get_success_rate(tests_file_path)
 
 if __name__ == "__main__":
+
+    main("continue", 0, 2)
+    
     ### Choose Parameters Here ###
-    session_dir = 'continue'         # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
+    session_dir = 'continue'    # 'new' or 'continue' or <session dir> - direction where the brain is (under /logs/session_dir)
     runs = 1000                 # no. runs - either execution of plan or exploration - before test
-    tests = 10                  # how many times tries to go from an active skill to finish from random spawn
+    tests = 2                  # how many times tries to go from an active skill to finish from random spawn
     time_limit = 12             # in hours, passing the limit breaks the loop
-    max_sessions = 1            # maximum number of session; break the loop early
+    max_sessions = 2         # maximum number of session; break the loop early
     min_success_rate = 0.7      # % of successful tests to break the loop early
 
-    run_til_success(session_dir, runs, tests, time_limit, max_sessions, min_success_rate)
-    main("continue", 0, 100)   # extra tests
+    success_rate = run_til_success(session_dir, runs, tests, time_limit, max_sessions, min_success_rate)
+
+    if not success_rate == 0:
+        main("continue", 0, 100)   # extra tests

@@ -91,6 +91,7 @@ class TheAgent(Agent):
         self.end_time = None
         self.run_count = 0
         self.batch_update_count = 0
+        self.completed_plans_count = 0
         self.timestamps = []
 
         ### --- brain --- ###
@@ -144,7 +145,7 @@ class TheAgent(Agent):
                 duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
                 f.write(f"start time: {start_str} | end time: {end_str} | duration: {duration_str}\n")
-                f.write(f"runs: {run}; brain updates: {self.batch_update_count}\n")
+                f.write(f"runs: {run}; brain updates: {self.batch_update_count}; completed plans: {self.completed_plans_count}\n")
                 f.write(f"{'Skill Name':<20} | {'True Positive':<15} | {'True Negative':<15} | {'False Positive':<15} | {'False Negative':<15} | {'Total':<15}\n")
                 f.write("-" * 100 + "\n")
                 for sk_name, counts in self.skill_stats.items():
@@ -234,6 +235,8 @@ class TheAgent(Agent):
                         print("[Agent] Failed action. Abandoning the plan.")
                         plan_completed = False
                         break
+                if plan_completed:
+                    self.completed_plans_count += 1
 
         except Exception as e:
             import traceback

@@ -10,7 +10,7 @@ class PipelinePictureGenerator(PictureGenerator):
             SymbolIconPictureGenerator(logs_root, session_dir=session_dir),
             SymbolCategoryPictureGenerator(logs_root, session_dir=session_dir),
             TransGraphPictureGenerator(logs_root, session_dir=session_dir),
-            UpdateFrequencyPictureGenerator(logs_root, session_dir=session_dir)
+            UpdateFrequencyPictureGenerator(logs_root, session_dir=session_dir, bin_size_sec=600.0)
         ]
 
     def run(self):

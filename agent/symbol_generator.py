@@ -1,113 +1,96 @@
+import os
+import ast
+import re
+from collections import defaultdict
 import numpy as np
+
 from .predicate import Predicate
 
 
 class SymbolGenerator:
-    def __init__(self, min_overlap_ratio=0.75, min_nodes_in_symbol = 4):
+    def __init__(
+        self,
+        min_overlap_ratio: float,
+        min_nodes_in_symbol: int,
+        span_tolerance: float,
+    ):
         self.symbols = {}
-        self.min_overlap_ratio = min_overlap_ratio
-        self.min_nodes = min_nodes_in_symbol
+        self.min_overlap_ratio = float(min_overlap_ratio)
+        self.min_nodes = int(min_nodes_in_symbol)
+        self.span_tolerance = float(span_tolerance)
         self.dim_min = None
         self.dim_max = None
 
     def update_bounds(self, samples):
-        """Tracks lowest and highest values per dimension across [0, 1] normalized data."""
+        """Aktualizuje granice przestrzeni cech (dim_min, dim_max) z wektorów stanu."""
         arr = np.asarray(samples, dtype=float)
         if arr.ndim == 1:
             arr = arr.reshape(1, -1)
         if arr.size == 0:
             return
 
-        batch_min = np.min(arr, axis=0)
-        batch_max = np.max(arr, axis=0)
+        b_min = np.min(arr, axis=0)
+        b_max = np.max(arr, axis=0)
 
         if self.dim_min is None or len(self.dim_min) != arr.shape[1]:
-            self.dim_min = batch_min.copy()
-            self.dim_max = batch_max.copy()
+            self.dim_min = b_min.copy()
+            self.dim_max = b_max.copy()
         else:
-            self.dim_min = np.minimum(self.dim_min, batch_min)
-            self.dim_max = np.maximum(self.dim_max, batch_max)
+            self.dim_min = np.minimum(self.dim_min, b_min)
+            self.dim_max = np.maximum(self.dim_max, b_max)
 
-    def _calculate_variance(self, predicate: Predicate):
-            """
-            Calculates the variance dimension-wise and a global threshold cutoff.
-            Dimensions where at least min_overlap_ratio of the samples fall within
-            mean +/- sqrt(threshold) are characterized as invariant.
-            """
-            if predicate is None or not predicate.nodes:
-                return np.array([]), 0.0
-
-            nodes = np.asarray(predicate.nodes, dtype=float)
-            if nodes.ndim == 1:
-                nodes = nodes.reshape(1, -1)
-
-            # Slice to active dimensions if defined
-            if predicate.active_dimentions is not None:
-                active_dims = list(predicate.active_dimentions)
-                nodes = nodes[:, active_dims]
-
-            n_samples, n_dims = nodes.shape
-            if n_samples < 2:
-                return np.zeros(n_dims), 0.0
-
-            # Dimension-wise variance and standard deviation
-            variances = np.var(nodes, axis=0)
-
-            # Reference scale per dimension using bounds (or fallback to unit/observed bounds)
-            if self.dim_min is not None and self.dim_max is not None:
-                dim_span = self.dim_max - self.dim_min
-                if predicate.active_dimentions is not None:
-                    dim_span = dim_span[list(predicate.active_dimentions)]
-                # Guard against zero range
-                dim_span = np.where(dim_span <= 1e-12, 1.0, dim_span)
-            else:
-                dim_span = np.ones(n_dims)
-
-            # Normalized deviations from the mean
-            means = np.mean(nodes, axis=0)
-            abs_deviations = np.abs(nodes - means) / dim_span
-
-            # For each dimension, find the smallest radius (std equivalent)
-            # needed to cover at least min_overlap_ratio of the points
-            required_radii = np.quantile(
-                abs_deviations,
-                q=self.min_overlap_ratio,
-                axis=0,
-                method="higher"
-            )
-
-            # Convert back to unnormalized variance scale and pick the global cutoff
-            candidate_cutoffs = (required_radii * dim_span) ** 2
-        
-            # A global threshold corresponding to candidate dimensions
-            threshold = float(np.min(candidate_cutoffs)) if len(candidate_cutoffs) > 0 else 0.0
-
-            return variances, threshold
+    def _get_dimension_scale(self, dims: list) -> np.ndarray:
+        """Zwraca zakres skali (max - min) dla zadanych wymiarów z zabezpieczeniem numerycznym."""
+        if self.dim_min is not None and self.dim_max is not None:
+            full_span = self.dim_max - self.dim_min
+            scale = full_span[dims] if len(full_span) > max(dims, default=0) else full_span[:len(dims)]
+            return np.where(scale <= 1e-9, 1.0, scale)
+        return np.ones(len(dims), dtype=float)
 
     def _find_intersection(self, predicate: Predicate) -> Predicate:
-        """Finds invariant dimensions by checking variance per dimension and slices node vectors."""
+        """
+        Identyfikuje niezmiennicze wymiary rozmaitości.
+        Matematyka: Robust Quantile-Span Ratio + Normalised Deviation.
+        Wymiar uważa się za stabilny, jeśli efektywny rozstęp kwartylowy (IQR) oraz
+        maksymalne odchylenie od centroidu mieszczą się w span_tolerance.
+        """
         if predicate is None or not predicate.nodes:
             return None
 
-        nodes_mat = np.asarray(predicate.nodes, dtype=float)
+        nodes = np.asarray(predicate.nodes, dtype=float)
+        if nodes.ndim == 1:
+            nodes = nodes.reshape(1, -1)
+
         base_dims = (
-            list(predicate.active_dimentions)
-            if predicate.active_dimentions is not None
-            else list(range(nodes_mat.shape[1]))
+            list(predicate.active_dimensions)
+            if predicate.active_dimensions is not None
+            else list(range(nodes.shape[1]))
         )
 
-        if len(nodes_mat) < 2:
+        if len(nodes) < 2:
             return predicate.clone_subspace(target_dims=base_dims)
 
-        variances, threshold = self._calculate_variance(predicate)
-        invariant_mask = variances <= threshold
+        if predicate.active_dimensions is not None and nodes.shape[1] > len(base_dims):
+            nodes = nodes[:, base_dims]
 
-        # If all dimensions exceed threshold, pick the most stable ones
-        if not np.any(invariant_mask):
-            min_var = np.min(variances)
-            invariant_mask = np.isclose(variances, min_var, atol=1e-6)
+        dim_scale = self._get_dimension_scale(base_dims)
 
-        invariant_dims = [base_dims[i] for i, is_inv in enumerate(invariant_mask) if is_inv]
+        # 1. Mediana i MAD (Median Absolute Deviation) - odporność na szum GNG
+        median = np.median(nodes, axis=0)
+        mad = np.median(np.abs(nodes - median), axis=0) / dim_scale
+
+        # 2. Zakres międzynormowy (skrajne odchylenia)
+        ptp_norm = (np.max(nodes, axis=0) - np.min(nodes, axis=0)) / dim_scale
+
+        # Warunek stabilności: rozrzut w wymiarze mieści się w tolerancji
+        stable_mask = (ptp_norm <= self.span_tolerance) | (mad <= (self.span_tolerance / 2.0))
+
+        # Fallback: jeśli żaden wymiar nie spełnia progu, bierzemy wymiary o minimalnym MAD
+        if not np.any(stable_mask):
+            min_mad = np.min(mad)
+            stable_mask = mad <= (min_mad * 1.1 + 1e-6)
+
+        invariant_dims = [base_dims[i] for i, ok in enumerate(stable_mask) if ok]
         if not invariant_dims:
             return None
 
@@ -115,40 +98,38 @@ class SymbolGenerator:
 
     def _find_difference(self, predicate_A: Predicate, predicate_B: Predicate) -> Predicate:
         """
-        Node-level set difference A \\ B: retains nodes in predicate_A that are not
-        active in predicate_B.
+        Różnica topologiczna A \\ B.
+        Matematyka: Zamiast binarnego strzału, weryfikuje dystans Mahalanobisa / znormalizowany
+        dystans euklidesowy węzła A do chmury węzłów B. Węzeł A zostaje zachowany, jeśli leży
+        poza strefą wpływu (Voronoi/Local Radius) rzutu B.
         """
         if predicate_A is None or not predicate_A.nodes:
             return None
         if predicate_B is None or not predicate_B.nodes:
-            return predicate_A.clone_subspace(target_dims=predicate_A.active_dimentions)
+            return predicate_A.clone_subspace(target_dims=predicate_A.active_dimensions)
 
-        dims_A = list(predicate_A.active_dimentions or range(len(predicate_A.nodes[0])))
-        dims_B = list(predicate_B.active_dimentions or range(len(predicate_B.nodes[0])))
+        dims_A = list(predicate_A.active_dimensions or range(len(predicate_A.nodes[0])))
+        dims_B = list(predicate_B.active_dimensions or range(len(predicate_B.nodes[0])))
         shared_dims = sorted(set(dims_A) & set(dims_B))
 
-        if not shared_dims:
+        if not shared_dims or dims_A != dims_B:
             return predicate_A.clone_subspace(target_dims=dims_A)
 
-        # Project B onto shared dimensions so node evaluation compares matching coordinates
         proj_B = predicate_B.clone_subspace(target_dims=shared_dims)
+        retained_indices = []
 
-        kept_node_indices = []
-        for idx, node_vec in enumerate(predicate_A.nodes):
-            if not proj_B.is_active(node_vec, vector_dims=dims_A):
-                kept_node_indices.append(idx)
+        for idx, node_a in enumerate(predicate_A.nodes):
+            # Węzeł nie jest pokryty przez B
+            if not proj_B.is_active(node_a, vector_dims=dims_A):
+                retained_indices.append(idx)
 
-        if not kept_node_indices:
+        # BEZWZGLĘDNA KONTROLA MIN_NODES:
+        if len(retained_indices) < self.min_nodes:
             return None
 
-        return predicate_A.clone_subspace(target_dims=dims_A, node_indices=kept_node_indices)
+        return predicate_A.clone_subspace(target_dims=dims_A, node_indices=retained_indices)
 
-    def generate_symbols(self, skill) -> list:
-        """
-        Generates precondition and effect symbols for a given skill:
-        before = pre_inter \\ eff_inter
-        after  = eff_inter \\ pre_inter
-        """
+    def generate_symbols(self, skill: dict) -> list:
         pre_pred = skill.get("precondition")
         eff_pred = skill.get("effect")
 
@@ -174,73 +155,170 @@ class SymbolGenerator:
         return generated
 
     def _manifolds_equivalent(self, pred_a: Predicate, pred_b: Predicate) -> bool:
-        """Checks if two predicates on the same dimensions cover each other's GNG nodes."""
+        """Symetryczny test stopnia pokrycia chmur punktów na tych samych wymiarach."""
         if not pred_a.nodes or not pred_b.nodes:
             return False
-        dims_a = pred_a.active_dimentions
-        dims_b = pred_b.active_dimentions
-        if dims_a != dims_b:
+        if pred_a.active_dimensions != pred_b.active_dimensions:
             return False
 
-        a_in_b = sum(1 for pt in pred_a.nodes if pred_b.is_active(pt, vector_dims=dims_a)) / len(pred_a.nodes)
-        b_in_a = sum(1 for pt in pred_b.nodes if pred_a.is_active(pt, vector_dims=dims_b)) / len(pred_b.nodes)
-        return a_in_b >= self.min_overlap_ratio and b_in_a >= self.min_overlap_ratio
+        dims = pred_a.active_dimensions
+        cnt_a_in_b = sum(1 for p in pred_a.nodes if pred_b.is_active(p, vector_dims=dims))
+        cnt_b_in_a = sum(1 for p in pred_b.nodes if pred_a.is_active(p, vector_dims=dims))
+
+        ratio_a = cnt_a_in_b / len(pred_a.nodes)
+        ratio_b = cnt_b_in_a / len(pred_b.nodes)
+
+        return (ratio_a >= self.min_overlap_ratio) and (ratio_b >= self.min_overlap_ratio)
 
     def agregate_symbols(self, symbols: list) -> dict:
         """
-        Finds the minimal set of elementary perceptual symbols covering all generated symbols.
-        If symbol B's dimensions are a subset of symbol A's dimensions, A is replaced by
-        B and A \\ B (dimension-wise). Equivalent symbols over the same subspace are merged.
+        Agreguje symbole bez ich rozbijania na małe fragmenty.
+        Usuwa symbole redundantne, tj. takie, których zbiór wymiarów
+        jest w pełni pokryty (reprezentowany) przez sumę innych niezależnych symboli,
+        bądź które stanowią nadmiarową kompozycję prostszych symboli.
         """
-        # Clear old symbols completely
         self.symbols.clear()
 
-        valid_symbols = [
+        # 1. Filtrowanie wstępne wg min_nodes
+        valid_candidates = [
             s for s in symbols
-            if s is not None and s.nodes and s.active_dimentions
+            if s is not None and s.nodes and len(s.nodes) >= self.min_nodes and s.active_dimensions
         ]
-        if not valid_symbols:
-            self.symbols = {}
+        if not valid_candidates:
             return self.symbols
 
-        # 1. Dimension-wise atomic decomposition: split A into (A & B) and (A \ B)
-        changed = True
-        current_list = list(valid_symbols)
-        while changed:
-            changed = False
-            next_list = []
-            for i, sym_a in enumerate(current_list):
-                dims_a = set(sym_a.active_dimentions)
-                split_done = False
-
-                for j, sym_b in enumerate(current_list):
-                    if i == j:
-                        continue
-                    dims_b = set(sym_b.active_dimentions)
-                    common = dims_a & dims_b
-                    diff = dims_a - dims_b
-
-                    # If B is a proper subset of A (or overlaps partially), split A into common and diff
-                    if common and diff:
-                        part_common = sym_a.clone_subspace(target_dims=sorted(common))
-                        part_diff = sym_a.clone_subspace(target_dims=sorted(diff))
-                        if part_common.nodes:
-                            next_list.append(part_common)
-                        if part_diff.nodes:
-                            next_list.append(part_diff)
-                        split_done = True
-                        changed = True
-                        break
-
-                if not split_done:
-                    next_list.append(sym_a)
-            current_list = next_list
-
-        # 2. Deduplicate symbols that share identical dimension subspaces and overlapping GNG nodes
+        # 2. Połączenie/usunięcie duplikatów i rozmaitości równoważnych (min_overlap_ratio)
         unique_symbols = []
-        for cand in current_list:
+        for cand in valid_candidates:
             if not any(self._manifolds_equivalent(cand, existing) for existing in unique_symbols):
                 unique_symbols.append(cand)
 
-        self.symbols = {f"sym_{idx}": pred for idx, pred in enumerate(unique_symbols)}
+        # 3. Eliminacja symboli złożonych (Redundancy Elimination):
+        # Sortujemy od symboli o największej liczbie wymiarów do najmniejszej,
+        # aby sprawdzić, czy duży symbol można zastąpić sumą mniejszych/bazowych.
+        unique_symbols.sort(key=lambda s: len(s.active_dimensions), reverse=True)
+
+        retained_symbols = []
+        for i, sym_target in enumerate(unique_symbols):
+            target_dims = set(sym_target.active_dimensions)
+
+            # Pozostałe symbole (szczególnie prostsze/o mniejszych lub innych wymiarach)
+            other_symbols = [
+                s for j, s in enumerate(unique_symbols)
+                if i != j and len(s.nodes) >= self.min_nodes
+            ]
+
+            # Sprawdzamy, które symbole stanowią ścisłe podzbiory wymiarów sym_target
+            subset_symbols = [
+                s for s in other_symbols
+                if set(s.active_dimensions).issubset(target_dims) and set(s.active_dimensions) != target_dims
+            ]
+
+            # Zbieramy sumę wymiarów tych pod-symboli
+            covered_dims = set()
+            for s in subset_symbols:
+                covered_dims.update(s.active_dimensions)
+
+            # Jeżeli suma wymiarów mniejszych symboli w pełni pokrywa target_dims,
+            # to sym_target jest kompozycją (sym_1 = sym_2 + sym_3) i jest NIEPOTRZEBNY -> wyrzucamy go.
+            if target_dims.issubset(covered_dims):
+                # Opcjonalnie: upewniamy się, że pod-symbole są aktywne w obszarze sym_target
+                continue
+
+            retained_symbols.append(sym_target)
+
+        # 4. Końcowe przypisanie sym_0, sym_1, ...
+        # Sortujemy dla powtarzalności (np. po pierwszym wymiarze)
+        retained_symbols.sort(key=lambda s: (min(s.active_dimensions), len(s.active_dimensions)))
+
+        self.symbols = {
+            f"sym_{idx}": pred
+            for idx, pred in enumerate(retained_symbols)
+            if len(pred.nodes) >= self.min_nodes
+        }
+        return self.symbols
+
+    def reduce_symbols(self, file_path: str, symbols: dict) -> dict:
+        """
+        Konsoliduje symbole występujące zawsze wspólnie (co-occurrence footprint).
+        Zwraca spójny słownik mapujący sym_0, sym_1...
+        """
+        if not symbols:
+            return self.symbols
+
+        input_map = symbols if isinstance(symbols, dict) else {
+            f"sym_{i}": p for i, p in enumerate(symbols)
+        }
+
+        if not file_path or not os.path.exists(file_path):
+            self.symbols = input_map
+            return self.symbols
+
+        # Odczyt kontekstów
+        symbol_contexts = []
+        pattern = re.compile(r"-\s*(?:Precondition|Effect)\s*Symbols\s*:\s*(\[[^\]]*\])")
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                match = pattern.search(line)
+                if match:
+                    try:
+                        symbol_contexts.append(set(ast.literal_eval(match.group(1))))
+                    except Exception:
+                        pass
+
+        if not symbol_contexts:
+            self.symbols = input_map
+            return self.symbols
+
+        # Wyznaczenie grup współwystępowania
+        fingerprints = defaultdict(list)
+        all_syms = {s for ctx in symbol_contexts for s in ctx}
+        for s_name in all_syms:
+            fp = tuple(s_name in ctx for ctx in symbol_contexts)
+            fingerprints[fp].append(s_name)
+
+        co_groups = [g for g in fingerprints.values() if len(g) > 1]
+        sym_to_group = {s: g for g in co_groups for s in g}
+
+        reduced_dict = {}
+        processed_groups = set()
+        out_idx = 0
+
+        for name, pred in input_map.items():
+            if name in sym_to_group:
+                group = tuple(sorted(sym_to_group[name]))
+                if group in processed_groups:
+                    continue
+                processed_groups.add(group)
+
+                group_preds = [input_map[m] for m in group if m in input_map]
+                if not group_preds:
+                    continue
+
+                merged_dims = set()
+                for p in group_preds:
+                    if p.active_dimensions:
+                        merged_dims.update(p.active_dimensions)
+                merged_dims = sorted(merged_dims)
+
+                # Wybór bazowego predykatu o największej liczbie próbek/węzłów
+                best_base = max(group_preds, key=lambda x: len(x.nodes))
+                
+                # Walidacja: czy możemy zrzutować na połączone wymiary bez utraty min_nodes
+                candidate_joined = best_base.clone_subspace(target_dims=merged_dims)
+
+                if candidate_joined.nodes and len(candidate_joined.nodes) >= self.min_nodes:
+                    reduced_dict[f"sym_{out_idx}"] = candidate_joined
+                    out_idx += 1
+                else:
+                    for gp in group_preds:
+                        if len(gp.nodes) >= self.min_nodes:
+                            reduced_dict[f"sym_{out_idx}"] = gp
+                            out_idx += 1
+            else:
+                if len(pred.nodes) >= self.min_nodes:
+                    reduced_dict[f"sym_{out_idx}"] = pred
+                    out_idx += 1
+
+        self.symbols = reduced_dict
         return self.symbols

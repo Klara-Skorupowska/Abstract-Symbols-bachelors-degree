@@ -233,38 +233,38 @@ class Predicate:
         )
         self.gng = GNG(**params)
         self.dim = int(dim) if dim is not None else None
-        self.active_dimentions = list(range(self.dim)) if self.dim is not None else None
+        self.active_dimensions = list(range(self.dim)) if self.dim is not None else None
 
     @property
     def nodes(self):
         return self.gng.nodes
 
-    def set_active_dimentions(self, dimentions=None):
-        if dimentions is not None:
-            self.active_dimentions = [int(d) for d in dimentions]
-            self.dim = len(self.active_dimentions)
+    def set_active_dimensions(self, dimensions=None):
+        if dimensions is not None:
+            self.active_dimensions = [int(d) for d in dimensions]
+            self.dim = len(self.active_dimensions)
             self.gng.dim = self.dim
         elif self.dim is not None:
-            self.active_dimentions = list(range(self.dim))
+            self.active_dimensions = list(range(self.dim))
         else:
-            print('\t[PREDICATE] Wrong active dimentions')
+            print('\t[PREDICATE] Wrong active dimensions')
 
     def _project_vector(self, vector, vector_dims=None):
         vec = np.asarray(vector, dtype=float)
-        if self.active_dimentions is None:
+        if self.active_dimensions is None:
             return vec
 
         if vector_dims is not None:
             dim_to_idx = {int(d): idx for idx, d in enumerate(vector_dims)}
-            if all(d in dim_to_idx for d in self.active_dimentions):
-                return np.array([vec[dim_to_idx[d]] for d in self.active_dimentions], dtype=float)
+            if all(d in dim_to_idx for d in self.active_dimensions):
+                return np.array([vec[dim_to_idx[d]] for d in self.active_dimensions], dtype=float)
             return None
 
-        if len(vec) == len(self.active_dimentions):
+        if len(vec) == len(self.active_dimensions):
             return vec
 
-        if len(vec) > max(self.active_dimentions, default=-1):
-            return vec[self.active_dimentions]
+        if len(vec) > max(self.active_dimensions, default=-1):
+            return vec[self.active_dimensions]
 
         return None
 
@@ -273,8 +273,8 @@ class Predicate:
         if self.dim is None:
             self.dim = len(vec)
             self.gng.dim = self.dim
-            if self.active_dimentions is None:
-                self.active_dimentions = list(range(self.dim))
+            if self.active_dimensions is None:
+                self.active_dimensions = list(range(self.dim))
 
         projected = self._project_vector(vec)
         if projected is not None and len(projected) == self.dim:
@@ -292,7 +292,7 @@ class Predicate:
     def clone_subspace(self, target_dims=None, node_indices=None) -> "Predicate":
         """Creates a new Predicate sliced to target_dims and/or filtered to node_indices."""
         if target_dims is None:
-            target_dims = list(self.active_dimentions) if self.active_dimentions is not None else []
+            target_dims = list(self.active_dimensions) if self.active_dimensions is not None else []
         else:
             target_dims = [int(d) for d in target_dims]
 
@@ -308,13 +308,13 @@ class Predicate:
             alpha=self.gng.alpha,
             d=self.gng.d
         )
-        new_pred.set_active_dimentions(target_dims)
+        new_pred.set_active_dimensions(target_dims)
 
         if not self.nodes or not target_dims:
             return new_pred
 
-        if self.active_dimentions is not None:
-            dim_map = {int(d): i for i, d in enumerate(self.active_dimentions)}
+        if self.active_dimensions is not None:
+            dim_map = {int(d): i for i, d in enumerate(self.active_dimensions)}
             local_cols = [dim_map[d] for d in target_dims if d in dim_map]
         else:
             local_cols = target_dims
@@ -358,7 +358,7 @@ class Predicate:
         data = {
             "gng": self.gng.serialize(),
             "dim": self.dim,
-            "active_dimentions": list(self.active_dimentions) if self.active_dimentions is not None else None,
+            "active_dimensions": list(self.active_dimensions) if self.active_dimensions is not None else None,
         }
 
         file_path = os.path.join(log_dir, f"{pred_name}.json")
@@ -387,7 +387,7 @@ class Predicate:
         gng_data = data.get("gng", {})
         params = gng_data.get("parameters", {})
         dim = data.get("dim", params.get("dim", None))
-        dimentions = data.get("active_dimentions", None)
+        dimensions = data.get("active_dimensions", None)
 
         self.dim = int(dim) if dim is not None else None
         self.gng = GNG(**params)
@@ -397,8 +397,8 @@ class Predicate:
             self.dim = len(self.gng.nodes[0])
             self.gng.dim = self.dim
 
-        if dimentions is not None:
-            self.set_active_dimentions(dimentions)
+        if dimensions is not None:
+            self.set_active_dimensions(dimensions)
         elif self.dim is not None:
-            self.set_active_dimentions(list(range(self.dim)))
+            self.set_active_dimensions(list(range(self.dim)))
         return self

@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import numpy as np
 
 from .predicate import Predicate
 from .symbol_generator import SymbolGenerator
@@ -13,8 +12,9 @@ class BrainNetwork:
         self.skills = {}
 
         ### HYPERPARAMETERS ###
-        self.min_overlap_ratio = 0.75
-        self.min_nodes = 4 
+        self.min_overlap_ratio = 1.0
+        self.min_nodes = 20        # changes no. symbols
+        self.span_tolerance = 0.1  # changes no. dimentions in symbols
 
         self.max_points = 40
         self.base_radius = 0.1
@@ -29,7 +29,8 @@ class BrainNetwork:
 
         self.symbol_gen = SymbolGenerator(
             min_overlap_ratio=self.min_overlap_ratio,
-            min_nodes_in_symbol = self.min_nodes
+            min_nodes_in_symbol = self.min_nodes,
+            span_tolerance = self.span_tolerance
         )
 
         self.log_dir = log_dir
@@ -38,6 +39,7 @@ class BrainNetwork:
             self.gas_dir = os.path.join(self.log_dir, "PDDL", "GNG")
             os.makedirs(self.pddl_dir, exist_ok=True)
             os.makedirs(self.gas_dir, exist_ok=True)
+            self.symbol_stats_path = os.path.join(self.log_dir, "symbol_statistics.txt")
 
     def add_node(self, skill_name: str, precondition: Predicate, effect: Predicate):
         self.skills[skill_name] = {
@@ -127,7 +129,9 @@ class BrainNetwork:
         raw_symbols = []
         for skill_data in self.skills.values():
             raw_symbols.extend(self.symbol_gen.generate_symbols(skill_data))
-        return self.symbol_gen.agregate_symbols(raw_symbols)
+
+        agregated = self.symbol_gen.agregate_symbols(raw_symbols)
+        return self.symbol_gen.reduce_symbols(file_path = self.symbol_stats_path, symbols = agregated)
 
     def get_active_symbols(self, vector) -> list:
         """
@@ -160,7 +164,7 @@ class BrainNetwork:
                 if pre_pts:
                     active_cnt = sum(
                         1 for pt in pre_pts
-                        if sym_pred.is_active(pt, vector_dims=pre_pred.active_dimentions)
+                        if sym_pred.is_active(pt, vector_dims=pre_pred.active_dimensions)
                     )
                     if (active_cnt / len(pre_pts)) >= self.min_overlap_ratio:
                         action_pre[sk_lower].add(sym_name)
@@ -168,7 +172,7 @@ class BrainNetwork:
                 if eff_pts:
                     active_cnt = sum(
                         1 for pt in eff_pts
-                        if sym_pred.is_active(pt, vector_dims=eff_pred.active_dimentions)
+                        if sym_pred.is_active(pt, vector_dims=eff_pred.active_dimensions)
                     )
                     if (active_cnt / len(eff_pts)) >= self.min_overlap_ratio:
                         action_eff[sk_lower].add(sym_name)
@@ -291,7 +295,7 @@ class BrainNetwork:
         for sym_name in sorted(symbols_map.keys()):
             pred = symbols_map[sym_name]
             lines.append(
-                f"  {sym_name:<10} | dims: {pred.active_dimentions} | nodes: {len(pred.nodes)}"
+                f"  {sym_name:<10} | dims: {pred.active_dimensions} | nodes: {len(pred.nodes)}"
             )
 
         lines.append("-" * 70)
@@ -345,7 +349,7 @@ class BrainNetwork:
             predicate.save_predicate(self.gas_dir, sym_name)
 
         # 3. Export symbol report reflecting only active symbols
-        self.export_symbol_statistics()
+        self.export_symbol_statistics(self.symbol_stats_path)
 
     def _logger(self):
         if not self.log_dir:
@@ -398,11 +402,14 @@ class BrainNetwork:
         for filename in os.listdir(src_gas_dir):
             match = re.match(r"^(sym_\d+)\.json$", filename)
             if match:
-                sym_name = match.group(1)
+                sym_name = match.group(1) 
                 sym_file = os.path.join(src_gas_dir, filename)
                 loaded_symbols[sym_name] = Predicate(self.max_points).load_predicate(sym_file)
 
-        if loaded_symbols:
-            self.symbol_gen.symbols = loaded_symbols
-        elif self.skills:
+
+        if self.skills:
             self.abstract_symbols()
+        elif self.symbol_gen.symbols is None and loaded_symbols:
+            self.symbol_gen.symbols = loaded_symbols
+
+        self._logger()

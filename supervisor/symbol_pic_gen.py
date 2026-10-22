@@ -42,7 +42,7 @@ def _load_symbol_data(json_path: str):
     nodes_arr = np.array(raw_nodes, dtype=np.float32)
 
     # Read active dimensions
-    active_dims = data.get("active_dimentions")
+    active_dims = data.get("active_dimensions")
     if active_dims is None:
         active_dims = data.get("active_dimensions", list(range(nodes_arr.shape[1])))
 
@@ -71,7 +71,7 @@ def _build_masks(active_set):
         active_ganglion.append(ganglion_active)
 
         # Cone R/G/B
-        cone_active = any((offset + ch) in active_set for ch in (2, 3, 4))
+        cone_active = all((offset + ch) in active_set for ch in (2, 3, 4))
         active_cones.append(cone_active)
 
     return lidar_active, active_ganglion, active_cones

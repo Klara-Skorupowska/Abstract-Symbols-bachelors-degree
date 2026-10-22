@@ -11,15 +11,16 @@
 ---------------------------------------
 ---------------------------------------
 ### 19.10.2026 ###
-[] dopisać generowanie graficznych symboli i monitorowania nauczania live
-[] prześledzić abstrahowanie symboli. Czy zgadza się z obrazkiem?
+[o] dopisać generowanie graficznych symboli 
+[] dodać monitorowanie nauczania live
+[o] prześledzić abstrahowanie symboli. Czy zgadza się z obrazkiem?
 
 ### 16.10.2026 ###
-[] poprawić abstrahowanie symboli, bo plan się nie tworzy
+[o] poprawić abstrahowanie symboli, bo plan się nie tworzy -> planu nadal nie ma, ale abstrahowanie jest już całkiem jasne
 [~] graf na podstawie pddl'a (przyda się przy sprawdzaniu symboli) = sprawdź czy jest spójne z plikiem
 [] ogólny porządek w kodzie = wyrzucić niepotrzebne, posprawdzać nazwy itp
 [o] porządek z wizualizacją: osobne pliki do renderera, live monitoringu i obrazków; osobne klasy per obrazek
-[] na początku generowania planów: nie potrzebujesz aktywnego predykatu jedynie aktywne symbole!
+[o] na początku generowania planów: nie potrzebujesz aktywnego predykatu jedynie aktywne symbole!
 
 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee działo się
 

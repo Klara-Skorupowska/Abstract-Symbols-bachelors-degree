@@ -1,8 +1,19 @@
 import json
-import re
 import os
+import re
 
 from .picture_generator import get_session
+
+SKILL_ORDER = [
+    "start",
+    "find_the_door",
+    "go_to_the_door",
+    "open_the_door",
+    "find_the_goal",
+    "go_to_the_goal",
+    "finish",
+]
+
 
 class GraphFromPDDL:
     def __init__(self, session_dir=None, logs_dir="logs"):
@@ -11,31 +22,33 @@ class GraphFromPDDL:
 
     def _parse_actions(self, content: str) -> dict:
         """
-        Parses all (:action ...) definitions in domain.pddl and extracts
+        Parses all (:action ...) blocks in domain.pddl and extracts
         precondition symbols and add (positive effect) symbols.
         """
         actions = {}
-
-        # Match blocks: (:action <name> ... :precondition (...) :effect (...))
-        pattern = re.compile(
-            r"\(:action\s+([a-zA-Z0-9_\-]+)\s+:parameters\s*\([^)]*\)\s+:precondition\s*(.*?)\s+:effect\s*(.*?)\s*\)",
+        raw_actions = re.findall(
+            r"\(:action\s+([a-zA-Z0-9_\-]+)(.*?)(?=\(:action|\)\s*\Z)",
+            content,
             re.DOTALL | re.IGNORECASE,
         )
 
-        for match in pattern.finditer(content):
-            act_name = match.group(1).strip()
-            pre_str = match.group(2).strip()
-            eff_str = match.group(3).strip()
+        reserved = {"and", "not", "or", "imply", "forall", "exists"}
 
-            # Extract precondition predicate symbols (ignoring 'and')
-            pre_symbols = set(re.findall(r"\(([a-zA-Z0-9_\-]+)\)", pre_str))
-            pre_symbols.discard("and")
+        for act_name, body in raw_actions:
+            act_name = act_name.strip().lower()
 
-            # Extract only positive added effect symbols (ignoring 'not' and 'and')
-            # First remove (not (...)) clauses so deleted symbols aren't treated as adds
-            eff_clean = re.sub(r"\(not\s*\([^)]*\)\)", "", eff_str)
-            eff_symbols = set(re.findall(r"\(([a-zA-Z0-9_\-]+)\)", eff_clean))
-            eff_symbols.discard("and")
+            pre_match = re.search(r":precondition\s*(.*?)(?=:effect|\Z)", body, re.DOTALL | re.IGNORECASE)
+            pre_str = pre_match.group(1) if pre_match else ""
+
+            eff_match = re.search(r":effect\s*(.*?)\Z", body, re.DOTALL | re.IGNORECASE)
+            eff_str = eff_match.group(1) if eff_match else ""
+
+            raw_pre = re.findall(r"\(\s*([a-zA-Z0-9_\-]+)", pre_str)
+            pre_symbols = {p.lower() for p in raw_pre if p.lower() not in reserved}
+
+            eff_clean = re.sub(r"\(\s*not\s*\([^)]*\)\s*\)", "", eff_str, flags=re.IGNORECASE)
+            raw_eff = re.findall(r"\(\s*([a-zA-Z0-9_\-]+)", eff_clean)
+            eff_symbols = {e.lower() for e in raw_eff if e.lower() not in reserved}
 
             actions[act_name] = {
                 "preconditions": pre_symbols,
@@ -55,25 +68,37 @@ class GraphFromPDDL:
         if not actions:
             return json.dumps({"nodes": [], "edges": []}, indent=4)
 
-        action_names = list(actions.keys())
-        nodes = sorted(action_names)
+        nodes = sorted(list(actions.keys()))
+        ordered_present = [s for s in SKILL_ORDER if s in actions]
+        n = len(ordered_present)
 
         edges = []
-        # Draw directed transition from action A to action B if B's preconditions
-        # are non-empty and fully satisfied by the effects of A
-        for u in nodes:
-            u_eff = actions[u]["effects"]
-            for v in nodes:
-                v_pre = actions[v]["preconditions"]
-                # Transition is possible if all preconditions of v are satisfied by u's effects
-                if v_pre and v_pre.issubset(u_eff):
-                    edges.append({"from": u, "to": v})
+        for i in range(n):
+            for j in range(n):
+                u = ordered_present[i]
+                v = ordered_present[j]
 
-        graph_data = {
-            "nodes": nodes,
-            "edges": edges,
-        }
-        return json.dumps(graph_data, indent=4)
+                u_eff = actions[u]["effects"]
+                v_pre = actions[v]["preconditions"]
+
+                if len(v_pre) == 0:
+                    fraction = 1.0
+                else:
+                    satisfied = len(v_pre.intersection(u_eff))
+                    fraction = satisfied / len(v_pre)
+
+                is_consecutive = (j == i + 1)
+                is_full = (fraction >= 1.0)
+
+                # Keep edge if on the consecutive main path or if fully satisfied (1.0)
+                if is_consecutive or is_full:
+                    edges.append({
+                        "source": u,
+                        "target": v,
+                        "weight": round(fraction, 2),
+                    })
+
+        return json.dumps({"nodes": nodes, "edges": edges}, indent=4)
 
     def save_file(self, data, filepath):
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
@@ -89,12 +114,10 @@ class GraphFromPDDL:
         domain_path = os.path.join(session, "PDDL", "task", "domain.pddl")
         json_graph = self.domain_to_json_graph(domain_path)
         if json_graph is None:
-            #print(f"[GraphFromPDDL] domain.pddl not found at: {domain_path}")
             return
 
         out_path = os.path.join(session, "graphs", "trans_graph_PDDL.json")
         self.save_file(json_graph, out_path)
-        #print(f"[GraphFromPDDL] Saved transition graph to: {out_path}")
 
 
 if __name__ == "__main__":
