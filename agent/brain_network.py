@@ -1,61 +1,90 @@
+from __future__ import annotations
 import os
 import re
-import time
+import json
+from pathlib import Path
+import numpy as np
 
 from .predicate import Predicate
 from .symbol_generator import SymbolGenerator
+from supervisor.loggers import SymbolStatsLogger
 
 
 class BrainNetwork:
-    def __init__(self, log_dir=None):
-        self.state_dim = None
-        self.skills = {}
+    """Neural-symbolic representation engine using Growing Neural Gas (GNG) and PDDL predicate abstraction."""
+
+    def __init__(self, log_dir: str | Path | None = None):
+        self.state_dim: int | None = None
+        self.skills: dict[str, dict[str, Predicate]] = {}
 
         ### HYPERPARAMETERS ###
-        self.min_overlap_ratio = 1.0
-        self.min_nodes = 20        # changes no. symbols
-        self.span_tolerance = 0.1  # changes no. dimentions in symbols
+        self.precision: float = 0.9          # Acceptance threshold for overlap/equivalence
+        self.n_test_points: int = 100        # Number of random points in symbol space for testing
+        self.min_nodes: int | None = None    # Minimum nodes in symbol; None defaults to predicate count
+        self.span_tolerance: float = 0.1     # Acceptable changes in value (% of min-max span)
 
-        self.max_points = 40
-        self.base_radius = 0.1
-        self.max_radius = 1.0
-        self.learning_rate_b = 0.2
-        self.learning_rate_n = 0.01
-        self.max_edge_age = 15
-        self.lambda_step = 5
-        self.alpha = 0.7
-        self.d = 0.99
-        ### --------------- ###
+        self.max_nodes: int = 40
+        self.base_radius: float = 0.1
+        self.max_radius: float = 1.0
+        self.learning_rate_b: float = 0.2
+        self.learning_rate_n: float = 0.01
+        self.max_edge_age: int = 15
+        self.lambda_step: int = 5
+        self.alpha: float = 0.7
+        self.d: float = 0.99
+        ### ---------------- ###
 
         self.symbol_gen = SymbolGenerator(
-            min_overlap_ratio=self.min_overlap_ratio,
-            min_nodes_in_symbol = self.min_nodes,
-            span_tolerance = self.span_tolerance
+            precision=self.precision,
+            min_nodes_in_symbol=self.min_nodes,
+            span_tolerance=self.span_tolerance,
+            n_test_points=self.n_test_points,
         )
 
-        self.log_dir = log_dir
-        if self.log_dir:
-            self.pddl_dir = os.path.join(self.log_dir, "PDDL")
-            self.gas_dir = os.path.join(self.log_dir, "PDDL", "GNG")
-            os.makedirs(self.pddl_dir, exist_ok=True)
-            os.makedirs(self.gas_dir, exist_ok=True)
-            self.symbol_stats_path = os.path.join(self.log_dir, "symbol_statistics.txt")
+        self.log_dir: str | None = None
+        self.pddl_dir: str | None = None
+        self.task_dir: str | None = None
+        self.gas_dir: str | None = None
+        self.logger: SymbolStatsLogger | None = None
+
+        if log_dir is not None:
+            self.set_output_dir(log_dir)
+
+    def set_output_dir(self, target_dir: str | Path | None):
+        """Re-targets all brain outputs to an active epoch directory."""
+        if target_dir is None:
+            self.log_dir = None
+            self.pddl_dir = None
+            self.task_dir = None
+            self.gas_dir = None
+            self.logger = None
+            return
+
+        self.log_dir = str(target_dir)
+        self.pddl_dir = os.path.join(self.log_dir, "PDDL")
+        self.task_dir = os.path.join(self.pddl_dir, "task")
+        self.gas_dir = os.path.join(self.pddl_dir, "GNG")
+        os.makedirs(self.task_dir, exist_ok=True)
+        os.makedirs(self.gas_dir, exist_ok=True)
+        self.logger = SymbolStatsLogger(self.log_dir)
 
     def add_node(self, skill_name: str, precondition: Predicate, effect: Predicate):
+        skill_name = skill_name.lower().strip()
         self.skills[skill_name] = {
             "precondition": precondition,
             "effect": effect
         }
 
     def create_node(self, skill_name: str):
+        skill_name = skill_name.lower().strip()
         if skill_name not in self.skills:
             precondition = Predicate(
-                self.max_points, self.state_dim, self.base_radius, self.max_radius,
+                self.max_nodes, self.state_dim, self.base_radius, self.max_radius,
                 self.learning_rate_b, self.learning_rate_n, self.max_edge_age,
                 self.lambda_step, self.alpha, self.d
             )
             effect = Predicate(
-                self.max_points, self.state_dim, self.base_radius, self.max_radius,
+                self.max_nodes, self.state_dim, self.base_radius, self.max_radius,
                 self.learning_rate_b, self.learning_rate_n, self.max_edge_age,
                 self.lambda_step, self.alpha, self.d
             )
@@ -65,133 +94,125 @@ class BrainNetwork:
         for skill_name in skillset:
             self.create_node(skill_name)
 
-    def preconditions_met(self, skill_name: str, state_vector) -> bool:
-        """
-        Checks if all symbols in the skill's precondition are currently active in state_vector.
-        """
+    def effects_met(self, skill_name: str, state_vector: np.ndarray) -> bool:
+        skill_name = skill_name.lower().strip()
         if skill_name not in self.skills:
             return False
 
-        sk_lower = skill_name.lower()
-        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
-        action_pre, _ = self._get_skill_symbol_interactions(symbols_map)
+        symbols_map = self.symbol_gen.get_all_symbols()
+        if not symbols_map:
+            return False
 
-        required_symbols = action_pre.get(sk_lower, set())
+        skill_map = self.symbol_gen.get_skill_map()
+        required_symbols = skill_map.get(skill_name, {}).get("effect", set())
+        if not required_symbols:
+            return False
 
-        # Filter out fallback predicates to isolate abstract symbols (sym_*)
-        abstract_req_symbols = [
-            s for s in required_symbols 
-            if s in symbols_map
-        ]
+        return all(
+            sym in symbols_map and symbols_map[sym].is_active(state_vector)
+            for sym in required_symbols
+        )
 
-        #    verify that all of them are active for the current state_vector
-        if abstract_req_symbols:
-            return all(symbols_map[sym_name].is_active(state_vector) for sym_name in abstract_req_symbols)
+    def preconditions_met(self, skill_name: str, state_vector: np.ndarray) -> bool:
+        skill_name = skill_name.lower().strip()
+        if skill_name not in self.skills:
+            return False
 
-        return False
+        symbols_map = self.symbol_gen.get_all_symbols()
+        if not symbols_map:
+            return False
 
-    def preconditions_status(self, skill_name: str, state_vector) -> str:
-        """Returns 'TRUE' if preconditions_met is satisfied, otherwise 'FALSE'."""
-        return "TRUE" if self.preconditions_met(skill_name, state_vector) else "FALSE"
+        skill_map = self.symbol_gen.get_skill_map()
+        required_symbols = skill_map.get(skill_name, {}).get("precondition", set())
+        if not required_symbols:
+            return False
 
-    def get_active_skills(self, vector) -> list:
-        if self.state_dim is None:
-            self.state_dim = len(vector)
+        return all(
+            sym in symbols_map and symbols_map[sym].is_active(state_vector)
+            for sym in required_symbols
+        )
 
-        return [
-            name for name, predicates in self.skills.items()
-            if predicates["precondition"].is_active(vector)
-        ]
+    def predicates_status(self, skill_name: str, state_vector: np.ndarray) -> str:
+        pre = self.preconditions_met(skill_name, state_vector)
+        eff = self.effects_met(skill_name, state_vector)
 
-    def get_nodes(self) -> list:
+        if pre and eff:
+            return 'BOTH'
+        if pre:
+            return 'PRECONDITIONS'
+        if eff:
+            return 'EFFECTS'
+        return 'FALSE'
+
+    def get_nodes(self) -> list[str]:
         return list(self.skills.keys())
 
-    def update(self, buffer):
+    def update(self, buffer: list):
         if not buffer:
             return
         print("\t[Brain] Updating Predicates (GNG)")
-        for pre_vector_state, skill_name, post_vector_state in buffer:
-            if self.state_dim is None:
-                self.state_dim = len(pre_vector_state)
 
+        pre_states = [item[0] for item in buffer]
+        post_states = [item[2] for item in buffer]
+        all_states = np.vstack([*pre_states, *post_states])
+        if self.state_dim is None:
+            self.state_dim = all_states.shape[1]
+        self.symbol_gen.update_bounds(all_states)
+
+        updated_skills = set()
+        for pre_vector_state, skill_name, post_vector_state in buffer:
+            skill_name = skill_name.lower().strip()
             if skill_name not in self.skills:
                 self.create_node(skill_name)
 
-            self.symbol_gen.update_bounds([pre_vector_state, post_vector_state])
             self.skills[skill_name]["precondition"].update(pre_vector_state)
             self.skills[skill_name]["effect"].update(post_vector_state)
+            updated_skills.add(skill_name)
 
-        self.abstract_symbols()
+        self.abstract_symbols(updated_skills=updated_skills)
+        self.generate_and_save_domain()
         self._logger()
 
-    def abstract_symbols(self) -> dict:
-        """Generates symbols for each skill and aggregates them into minimal sym_i predicates."""
-        raw_symbols = []
-        for skill_data in self.skills.values():
-            raw_symbols.extend(self.symbol_gen.generate_symbols(skill_data))
+    def abstract_symbols(self, updated_skills: set[str] | None = None) -> None:
+        if updated_skills is None:
+            updated_skills = set(self.skills.keys())
+        
+        for skill_name in updated_skills:
+            if skill_name in self.skills:
+                skill_name = skill_name.lower().strip()
+                self.symbol_gen.generate_symbols(skill_name, self.skills[skill_name])
+                self.symbol_gen.agregate_symbols(skill_name)
 
-        agregated = self.symbol_gen.agregate_symbols(raw_symbols)
-        return self.symbol_gen.reduce_symbols(file_path = self.symbol_stats_path, symbols = agregated)
-
-    def get_active_symbols(self, vector) -> list:
-        """
-        Returns active symbols (sym_0, sym_1, ...).
-        """
-        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
+    def get_active_symbols(self, vector: np.ndarray) -> list[str]:
+        symbols_map = self.symbol_gen.get_all_symbols()
+        if not symbols_map:
+            self.abstract_symbols()
+            symbols_map = self.symbol_gen.get_all_symbols()
         if symbols_map:
             return [sym_name for sym_name, pred in symbols_map.items() if pred.is_active(vector)]
-
         return []
 
-    def _get_skill_symbol_interactions(self, symbols_map: dict):
-        """
-        Specifies active symbols before and after execution of each action.
-        """
-        action_pre = {}
-        action_eff = {}
+    def generate_and_save_domain(self, domain_name: str = "robot_domain") -> str:
+        """Writes domain.pddl inside PDDL/task/ of the epoch directory."""
+        if not self.task_dir:
+            return ""
+        os.makedirs(self.task_dir, exist_ok=True)
+        domain_file = os.path.join(self.task_dir, "domain.pddl")
+        domain_content = self.generate_domain_pddl(domain_name=domain_name)
+        with open(domain_file, "w", encoding="utf-8") as f:
+            f.write(domain_content)
+        return domain_file
 
-        for skill_name, skill_data in self.skills.items():
-            sk_lower = skill_name.lower()
-            action_pre[sk_lower] = set()
-            action_eff[sk_lower] = set()
+    def generate_domain_pddl(self, domain_name: str = "robot_domain") -> str:
+        self.symbol_gen.merge_symbols()
 
-            pre_pred = skill_data["precondition"]
-            eff_pred = skill_data["effect"]
-            pre_pts = pre_pred.nodes
-            eff_pts = eff_pred.nodes
-
-            for sym_name, sym_pred in symbols_map.items():
-                if pre_pts:
-                    active_cnt = sum(
-                        1 for pt in pre_pts
-                        if sym_pred.is_active(pt, vector_dims=pre_pred.active_dimensions)
-                    )
-                    if (active_cnt / len(pre_pts)) >= self.min_overlap_ratio:
-                        action_pre[sk_lower].add(sym_name)
-
-                if eff_pts:
-                    active_cnt = sum(
-                        1 for pt in eff_pts
-                        if sym_pred.is_active(pt, vector_dims=eff_pred.active_dimensions)
-                    )
-                    if (active_cnt / len(eff_pts)) >= self.min_overlap_ratio:
-                        action_eff[sk_lower].add(sym_name)
-
-        return action_pre, action_eff
-
-    def generate_domain_pddl(self, domain_name="robot_domain") -> str:
-        """
-        Generates a PDDL domain file strictly formatted for pyperplan.
-        Ensures all possible goal/action predicates are declared in (:predicates ...).
-        """
-        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
-        action_pre, action_eff = self._get_skill_symbol_interactions(symbols_map)
+        symbols_map = self.symbol_gen.get_all_symbols()
+        skill_map = self.symbol_gen.get_skill_map()
 
         all_predicates = set(symbols_map.keys())
-        for preds in action_pre.values():
-            all_predicates.update(preds)
-        for preds in action_eff.values():
-            all_predicates.update(preds)
+        for roles in skill_map.values():
+            all_predicates.update(roles["precondition"])
+            all_predicates.update(roles["effect"])
 
         pddl = [
             f"(define (domain {domain_name})",
@@ -204,25 +225,16 @@ class BrainNetwork:
 
         for skill_name in sorted(self.skills.keys()):
             sk_lower = skill_name.lower()
-            pre_conditions = action_pre.get(sk_lower, set())
-            eff_conditions = action_eff.get(sk_lower, set())
-
-            # Fallback if an action has no symbol interactions mapped yet
-            if not pre_conditions:
-                continue
-            if not eff_conditions:
-                continue
+            roles = skill_map.get(skill_name, {"precondition": set(), "effect": set()})
+            pre_conditions = set(roles["precondition"])
+            eff_conditions = set(roles["effect"])
 
             adds = set(eff_conditions)
             dels = set(pre_conditions - eff_conditions)
 
-            # Precondition: CNF compliant
-            pre_body = f"(and {' '.join(f'({p})' for p in sorted(pre_conditions))})"
-
-            # Effect: CNF compliant
-            eff_tokens = [f"({a})" for a in sorted(adds)]
-            eff_tokens.extend([f"(not ({d}))" for d in sorted(dels)])
-            eff_body = f"(and {' '.join(eff_tokens)})"
+            pre_body = f"(and {' '.join(f'({p})' for p in sorted(pre_conditions))})" if pre_conditions else "(and)"
+            eff_tokens = [f"({a})" for a in sorted(adds)] + [f"(not ({d}))" for d in sorted(dels)]
+            eff_body = f"(and {' '.join(eff_tokens)})" if eff_tokens else "(and)"
 
             pddl.extend([
                 "",
@@ -236,19 +248,13 @@ class BrainNetwork:
         pddl.append(")")
         return "\n".join(pddl)
 
-    def generate_problem_pddl(self, active_symbols, goal_skill: str,
-                              problem_name="plan_problem", domain_name="robot_domain") -> str:
-        """
-        Generates a PDDL problem file formatted for pyperplan.
-        Guarantees that all init and goal predicates exist in the domain.
-        """
-        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
-        action_pre, _ = self._get_skill_symbol_interactions(symbols_map)
-
-        init_predicates = set(active_symbols)
-
-        goal_lower = goal_skill.lower()
-        goal_predicates = set(action_pre.get(goal_lower, set()))
+    def generate_problem_pddl(
+        self, active_symbols: list[str], goal_skill: str,
+        problem_name: str = "plan_problem", domain_name: str = "robot_domain"
+    ) -> str:
+        goal_skill = goal_skill.lower().strip()
+        skill_map = self.symbol_gen.get_skill_map()
+        goal_predicates = set(skill_map.get(goal_skill, {}).get("effect", set()))
 
         if not goal_predicates:
             return ""
@@ -258,7 +264,7 @@ class BrainNetwork:
             f"  (:domain {domain_name})",
             "  (:init"
         ]
-        for pred in sorted(init_predicates):
+        for pred in sorted(active_symbols):
             pddl.append(f"    ({pred})")
         pddl.append("  )")
 
@@ -270,89 +276,53 @@ class BrainNetwork:
 
         return "\n".join(pddl)
 
-    def export_symbol_statistics(self, file_path=None):
-        """Exports active dimensions and node counts of aggregated symbols and skills."""
-        if not self.log_dir and file_path is None:
-            return
-
-        if file_path is None:
-            file_path = os.path.join(self.log_dir, "symbol_statistics.txt")
-
-        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-        symbols_map = self.symbol_gen.symbols
-        action_pre, action_eff = self._get_skill_symbol_interactions(symbols_map)
-
-        lines = [
-            "=" * 70,
-            "SYMBOL & SKILL ABSTRACTION STATISTICS",
-            "=" * 70,
-            f"State Dimension: {self.state_dim}",
-            f"Total Aggregated Symbols: {len(symbols_map)}",
-            "-" * 70,
-            "SYMBOLS:"
-        ]
-
-        for sym_name in sorted(symbols_map.keys()):
-            pred = symbols_map[sym_name]
-            lines.append(
-                f"  {sym_name:<10} | dims: {pred.active_dimensions} | nodes: {len(pred.nodes)}"
-            )
-
-        lines.append("-" * 70)
-        lines.append("SKILL INTERACTIONS:")
-        for skill_name in sorted(self.skills.keys()):
-            sk_lower = skill_name.lower()
-            pre_syms = sorted(action_pre.get(sk_lower, set()))
-            eff_syms = sorted(action_eff.get(sk_lower, set()))
-            lines.append(f"Skill: {skill_name}")
-            lines.append(f"  - Precondition Symbols : {pre_syms}")
-            lines.append(f"  - Effect Symbols       : {eff_syms}")
-            lines.append("-" * 70)
-
-        temp_file = f"{file_path}.tmp"
-        with open(temp_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-
-        for _ in range(5):
-            try:
-                os.replace(temp_file, file_path)
-                break
-            except (PermissionError, OSError):
-                time.sleep(0.05)
-
     def save_abstract_symbols(self):
-        """
-        Saves all aggregated symbols (sym_0, sym_1, ...) as Predicate JSON files.
-        Deletes old symbol files from disk that are no longer part of the current active symbols.
-        """
-        if not self.log_dir:
+        if not self.gas_dir:
             return
 
         os.makedirs(self.gas_dir, exist_ok=True)
-
-        symbols_map = self.symbol_gen.symbols or self.abstract_symbols()
+        symbols_map = self.symbol_gen.get_all_symbols()
         active_filenames = {f"{sym_name}.json" for sym_name in symbols_map.keys()}
 
-        # 1. Scan and delete old symbol files not present in the current symbols_map
         for fname in os.listdir(self.gas_dir):
-            is_symbol_file = (
-                re.match(r"^sym_\d+\.(json|tmp)$", fname) is not None
-            )
-            if is_symbol_file and fname not in active_filenames:
-                try:
-                    os.remove(os.path.join(self.gas_dir, fname))
-                except OSError:
-                    pass
+            if fname.endswith(".json") and re.match(r"^sym_\d+\.json$", fname):
+                if fname not in active_filenames:
+                    try:
+                        os.remove(os.path.join(self.gas_dir, fname))
+                    except OSError:
+                        pass
 
-        # 2. Save only the current, active symbols
         for sym_name, predicate in symbols_map.items():
             predicate.save_predicate(self.gas_dir, sym_name)
 
-        # 3. Export symbol report reflecting only active symbols
-        self.export_symbol_statistics(self.symbol_stats_path)
+        if self.logger:
+            self.logger.export_statistics(
+                self.state_dim,
+                self.symbol_gen.get_all_symbols(),
+                self.symbol_gen.get_skill_map(),
+                self.skills
+            )
+
+    def save_skill_map(self):
+        if not self.gas_dir:
+            return
+        map_path = os.path.join(self.gas_dir, "skill_map.json")
+        serializable_map = {
+            "skills": {
+                sk: {role: list(syms) for role, syms in roles.items()}
+                for sk, roles in self.symbol_gen.skill_map.items()
+            },
+            "bounds": {
+                "dim_min": self.symbol_gen.dim_min.tolist() if self.symbol_gen.dim_min is not None else None,
+                "dim_max": self.symbol_gen.dim_max.tolist() if self.symbol_gen.dim_max is not None else None,
+                "state_dim": self.state_dim,
+            }
+        }
+        with open(map_path, "w", encoding="utf-8") as f:
+            json.dump(serializable_map, f, indent=2)
 
     def _logger(self):
-        if not self.log_dir:
+        if not self.log_dir or not self.gas_dir:
             return
 
         for skill_name, predicates in self.skills.items():
@@ -360,17 +330,29 @@ class BrainNetwork:
             predicates["effect"].save_predicate(self.gas_dir, f"{skill_name}_eff")
 
         self.save_abstract_symbols()
+        self.save_skill_map()
 
-    def load_brain(self, source_dir):
-        """Loads skill predicates and abstract symbols from disk using Predicate.load_predicate."""
-        print("\t[Brain] Loading brain from files.")
-        if source_dir is None or not os.path.isdir(source_dir):
-            print("\t[Brain] Invalid source directory.")
+    def save_symbol_stats(self, filename: str = "symbol_stats_log.txt") -> str:
+        if self.logger:
+            return self.logger.log_continuous_stats(
+                self.symbol_gen.get_all_symbols() or {},
+                self.symbol_gen.get_skill_map() or {},
+                len(self.skills),
+                filename=filename
+            )
+        return ""
+
+    def load_brain(self, source_epoch_dir: str | Path | None, regenerate_symbols: bool = False):
+        """Loads skill predicates and abstract symbols directly from source epoch PDDL/GNG directory."""
+        if source_epoch_dir is None:
             return
 
-        src_gas_dir = os.path.join(source_dir, "PDDL", "GNG")
-        if not os.path.exists(src_gas_dir):
-            print(f"\t[Brain] Could not find GNG directory: {src_gas_dir}")
+        source_path = Path(source_epoch_dir)
+        print(f"\t[Brain] Loading brain state from epoch: {source_path}")
+
+        src_gas_dir = source_path / "PDDL" / "GNG"
+        if not src_gas_dir.exists():
+            print(f"\t[Brain] Warning: GNG directory not found at {src_gas_dir}")
             return
 
         skill_names = set()
@@ -380,36 +362,63 @@ class BrainNetwork:
                 skill_names.add(match.group(1))
 
         for name in skill_names:
-            pre_file = os.path.join(src_gas_dir, f"{name}_init.json")
-            eff_file = os.path.join(src_gas_dir, f"{name}_eff.json")
+            pre_file = src_gas_dir / f"{name}_init.json"
+            eff_file = src_gas_dir / f"{name}_eff.json"
 
-            if os.path.exists(pre_file) and os.path.exists(eff_file):
-                precondition = Predicate(self.max_points).load_predicate(pre_file)
-                effect = Predicate(self.max_points).load_predicate(eff_file)
+            if pre_file.exists() and eff_file.exists():
+                precondition = Predicate(self.max_nodes).load_predicate(str(pre_file))
+                effect = Predicate(self.max_nodes).load_predicate(str(eff_file))
                 self.add_node(name, precondition, effect)
 
-                if self.state_dim is None and precondition.nodes:
-                    self.state_dim = len(precondition.nodes[0])
-                if precondition.nodes:
-                    self.symbol_gen.update_bounds(precondition.nodes)
-                if effect.nodes:
-                    self.symbol_gen.update_bounds(effect.nodes)
+                if self.state_dim is None and len(precondition.nodes) > 0:
+                    self.state_dim = precondition.nodes.shape[1]
             else:
                 print(f"\t[Brain] Incomplete predicates for skill '{name}', skipping.")
 
-        # Load saved sym_i predicates if present, otherwise regenerate
         loaded_symbols = {}
         for filename in os.listdir(src_gas_dir):
             match = re.match(r"^(sym_\d+)\.json$", filename)
             if match:
-                sym_name = match.group(1) 
-                sym_file = os.path.join(src_gas_dir, filename)
-                loaded_symbols[sym_name] = Predicate(self.max_points).load_predicate(sym_file)
+                sym_name = match.group(1)
+                sym_file = src_gas_dir / filename
+                loaded_symbols[sym_name] = Predicate(self.max_nodes).load_predicate(str(sym_file))
 
+        map_path = src_gas_dir / "skill_map.json"
+        if map_path.exists():
+            with map_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
 
-        if self.skills:
-            self.abstract_symbols()
-        elif self.symbol_gen.symbols is None and loaded_symbols:
+            loaded_map = data.get("skills", data)
+            for sk, roles in loaded_map.items():
+                self.symbol_gen.skill_map[sk]["precondition"] = set(roles.get("precondition", []))
+                self.symbol_gen.skill_map[sk]["effect"] = set(roles.get("effect", []))
+
+            if "bounds" in data:
+                b_min = data["bounds"].get("dim_min")
+                b_max = data["bounds"].get("dim_max")
+                if b_min is not None and b_max is not None:
+                    self.symbol_gen.dim_min = np.asarray(b_min, dtype=np.float64)
+                    self.symbol_gen.dim_max = np.asarray(b_max, dtype=np.float64)
+                if data["bounds"].get("state_dim"):
+                    self.state_dim = data["bounds"]["state_dim"]
+
+        if self.symbol_gen.dim_min is None:
+            for skill in self.skills.values():
+                if len(skill["precondition"].nodes) > 0:
+                    self.symbol_gen.update_bounds(skill["precondition"].nodes)
+                if len(skill["effect"].nodes) > 0:
+                    self.symbol_gen.update_bounds(skill["effect"].nodes)
+
+        if loaded_symbols and not regenerate_symbols:
             self.symbol_gen.symbols = loaded_symbols
+            print(f"\t[Brain] Successfully restored {len(loaded_symbols)} symbols from disk.")
+        else:
+            print("\t[Brain] Re-abstracting symbols from scratch.")
+            self.symbol_gen.symbols.clear()
+            self.abstract_symbols()
 
-        self._logger()
+        # If an active epoch output directory is already configured, write state there
+        if self.log_dir:
+            self.generate_and_save_domain()
+            self.save_abstract_symbols()
+            self._logger()

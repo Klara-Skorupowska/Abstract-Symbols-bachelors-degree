@@ -35,13 +35,7 @@ try:
 except ImportError as e:
     print(f"[Warning] Failed to import one or more modules: {e}")
 
-# Try importing Optuna, fallback gracefully if not present
-try:
-    import optuna
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    HAVE_OPTUNA = True
-except ImportError:
-    HAVE_OPTUNA = False
+HAVE_OPTUNA = False
 
 # -------------------------------------------------------------------------
 # Session History Tracing & Transition Concatenation

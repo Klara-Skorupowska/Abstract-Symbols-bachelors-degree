@@ -1,9 +1,11 @@
 import random
-from communicator import Communicator
+import functools
 import numpy as np
 import math
 import pybullet as p
 import time
+
+from communicator import Communicator
 
 class Supervisor():
     '''
@@ -23,6 +25,14 @@ class Supervisor():
         self.bus.register_service(f"/supervisor/ask/goal_zone", self.goal_zone)
 
         self.bus.register_service(f"/supervisor/do/restart", self.restart)
+        self.bus.register_service(
+            "/supervisor/do/FinishReached",
+            functools.partial(self.finish_color, color=[1.0, 1.0, 1.0, 1.0]) # white
+        )
+        self.bus.register_service(
+            "/supervisor/do/FinishReset",
+            functools.partial(self.finish_color, color=[0.9, 0.8, 0.2, 1.0]) # yellow
+        )
 
         self.bus.register_service(f"/supervisor/do/switchSleep", self.switch_sleep)
         self.sleeping = False
@@ -206,6 +216,12 @@ class Supervisor():
             p.removeUserDebugItem(self.sleep_text_id)
             self.sleep_text_id = None
         self.sleeping = False
+
+        if self.think_text_id is not None:
+            p.removeUserDebugItem(self.think_text_id)
+            self.think_text_id = None
+        self.thinking = False
+
         # Reset robot position
         _, orientation = self.bus.call_service(f"/realrobot/give_initial_position")
         x_pos = random.uniform(-0.45, -0.25)
@@ -215,3 +231,23 @@ class Supervisor():
         p.resetBaseVelocity(self.robot_id, [0, 0, 0], [0, 0, 0])
         time.sleep(1.0)
         
+    def finish_color(self, request=None, color=None):
+        if color is None:
+            color = [0.0, 0.0, 0.0, 1.0]
+
+        joint_name_to_index = self._joint_name_to_index(self.arena_id)
+        goal_idx = joint_name_to_index.get("end_joint")
+
+        if goal_idx is None:
+            print("[Supervisor] Warning: 'end_joint' not found in URDF.")
+            return False
+
+        p.changeVisualShape(
+            objectUniqueId=self.arena_id,
+            linkIndex=goal_idx,
+            rgbaColor=color
+        )
+        print(f"[Supervisor] Goal color set to {color} (RGBA).")
+
+        time.sleep(0.1)
+        return True

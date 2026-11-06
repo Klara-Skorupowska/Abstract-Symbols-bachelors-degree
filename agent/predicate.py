@@ -1,164 +1,206 @@
 import os
 import json
 import time
+import uuid
 import numpy as np
+from scipy.spatial.distance import cdist
 
 
 class GNG:
-    """Standard, stable Growing Neural Gas network."""
+    """Zoptymalizowana sieć Growing Neural Gas dla wysokich wymiarów."""
     def __init__(self, max_points=20, dim=None, base_radius=0.1, max_radius=1.0,
                  learning_rate_b=0.2, learning_rate_n=0.006,
                  max_edge_age=50, lambda_step=10, alpha=0.5, d=0.995):
         self.dim = int(dim) if dim is not None else None
         self.max_points = max_points
-        self.base_radius = base_radius
-        self.max_radius = max_radius
+        self.base_radius = float(base_radius)
+        self.max_radius = float(max_radius)
         self.radii_factor = 0.5
-        self.eb = learning_rate_b
-        self.en = learning_rate_n
-        self.max_age = max_edge_age
-        self.lambda_step = lambda_step
-        self.alpha = alpha
-        self.d = d
+        self.eb = float(learning_rate_b)
+        self.en = float(learning_rate_n)
+        self.max_age = int(max_edge_age)
+        self.lambda_step = int(lambda_step)
+        self.alpha = float(alpha)
+        self.d = float(d)
 
-        self.nodes = []
-        self.errors = []
+        self.nodes = np.empty((0, self.dim if self.dim is not None else 0), dtype=np.float64)
+        self.errors = np.empty((0,), dtype=np.float64)
         self.edges = {}
         self.adj = {}
         self.cached_radii = None
         self.update_count = 0
 
+    @property
+    def num_nodes(self):
+        return len(self.nodes)
+
     def _add_edge(self, u, v, age=0):
         if u == v:
             return
-        self.edges[tuple(sorted((u, v)))] = age
+        edge = (u, v) if u < v else (v, u)
+        self.edges[edge] = age
         self.adj.setdefault(u, set()).add(v)
         self.adj.setdefault(v, set()).add(u)
 
     def _remove_edge(self, u, v):
-        edge = tuple(sorted((u, v)))
+        edge = (u, v) if u < v else (v, u)
         if edge in self.edges:
             del self.edges[edge]
-        if u in self.adj and v in self.adj[u]:
-            self.adj[u].remove(v)
-        if v in self.adj and u in self.adj[v]:
-            self.adj[v].remove(u)
+        if u in self.adj:
+            self.adj[u].discard(v)
+        if v in self.adj:
+            self.adj[v].discard(u)
+
+    def _recompute_radii(self):
+        n = self.num_nodes
+        if n == 0:
+            self.cached_radii = np.empty((0,), dtype=np.float64)
+            return
+
+        radii = np.full(n, self.base_radius, dtype=np.float64)
+
+        for i in range(n):
+            nbrs = list(self.adj.get(i, ()))
+            if nbrs:
+                diff = self.nodes[nbrs] - self.nodes[i]
+                min_d = np.min(np.sqrt(np.sum(diff * diff, axis=1)))
+                radii[i] = np.clip(min_d * self.radii_factor, self.base_radius, self.max_radius)
+
+        self.cached_radii = radii
 
     def _get_local_radius(self, node_idx):
-        if self.cached_radii is not None and node_idx < len(self.cached_radii):
+        if self.cached_radii is None:
+            self._recompute_radii()
+        if node_idx < len(self.cached_radii):
             return self.cached_radii[node_idx]
-        neighbors = self.adj.get(node_idx, set())
-        nodes_mat = np.asarray(self.nodes, dtype=float)
-        norm_factor = np.sqrt(self.dim) if (self.dim and self.dim > 0) else 1.0
+        return self.base_radius
 
-        if not neighbors:
-            return self.base_radius
+    def is_active(self, vectors) -> np.ndarray:
+        if self.num_nodes == 0:
+            arr = np.asarray(vectors)
+            return False if arr.ndim == 1 else np.zeros(len(arr), dtype=bool)
 
-        ref_node = nodes_mat[node_idx]
-        dists = [np.linalg.norm(ref_node - nodes_mat[n]) / norm_factor for n in neighbors]
-        raw_radius = min(dists) * self.radii_factor
-        return float(np.clip(raw_radius, self.base_radius, self.max_radius))
+        arr = np.asarray(vectors, dtype=np.float64)
+        is_single = (arr.ndim == 1)
+        if is_single:
+            arr = arr.reshape(1, -1)
 
-    def is_active(self, vector) -> bool:
-        if not self.nodes:
-            return False
-        vec = np.asarray(vector, dtype=float)
-        nodes_mat = np.asarray(self.nodes, dtype=float)
-        dim = len(vec)
-        if dim == 0 or nodes_mat.shape[1] != dim:
-            return False
-        norm_factor = np.sqrt(dim)
+        dim = arr.shape[1]
+        if dim == 0 or self.nodes.shape[1] != dim:
+            res = np.zeros(len(arr), dtype=bool)
+            return bool(res[0]) if is_single else res
 
-        dists = np.linalg.norm(nodes_mat - vec, axis=1) / norm_factor
-        n1_idx = int(np.argmin(dists))
-        return bool(dists[n1_idx] <= self._get_local_radius(n1_idx))
+        if self.cached_radii is None:
+            self._recompute_radii()
+
+        dists = cdist(arr, self.nodes, metric='euclidean')
+        nearest_idx = np.argmin(dists, axis=1)
+        min_dists = dists[np.arange(len(arr)), nearest_idx]
+
+        active = min_dists <= self.cached_radii[nearest_idx]
+        return bool(active[0]) if is_single else active
 
     def _insert_node(self):
-        if not self.errors:
+        if len(self.errors) == 0:
             return
         q = int(np.argmax(self.errors))
-        neighbors = list(self.adj.get(q, set()))
+        neighbors = list(self.adj.get(q, ()))
         if not neighbors:
             return
-        f = neighbors[int(np.argmax([self.errors[n] for n in neighbors]))]
+        f = neighbors[int(np.argmax(self.errors[neighbors]))]
+
         r_pos = 0.5 * (self.nodes[q] + self.nodes[f])
-        self.nodes.append(r_pos)
-        self.errors.append(0.0)
-        r = len(self.nodes) - 1
+        self.nodes = np.vstack([self.nodes, r_pos])
+        self.errors = np.append(self.errors, 0.0)
+        r = self.num_nodes - 1
+
         self._remove_edge(q, f)
         self._add_edge(q, r, age=0)
         self._add_edge(f, r, age=0)
+
         self.errors[q] *= self.alpha
         self.errors[f] *= self.alpha
         self.errors[r] = self.errors[q]
+        self.cached_radii = None
 
     def tidy(self):
-        for edge in list(self.edges.keys()):
-            if self.edges[edge] > self.max_age:
-                del self.edges[edge]
+        max_age = self.max_age
+        for edge, age in list(self.edges.items()):
+            if age > max_age:
+                self._remove_edge(edge[0], edge[1])
+
         connected = set()
         for u, v in self.edges.keys():
             connected.add(u)
             connected.add(v)
-        if len(connected) < len(self.nodes) and len(self.nodes) > 1:
-            new_nodes, new_errors, idx_map = [], [], {}
-            for i in range(len(self.nodes)):
-                if i in connected:
-                    idx_map[i] = len(new_nodes)
-                    new_nodes.append(self.nodes[i])
-                    new_errors.append(self.errors[i])
-            self.nodes, self.errors = new_nodes, new_errors
+
+        n = self.num_nodes
+        if 0 < len(connected) < n:
+            conn_mask = np.zeros(n, dtype=bool)
+            conn_indices = np.array(sorted(connected), dtype=int)
+            conn_mask[conn_indices] = True
+
+            idx_map = {old_i: new_i for new_i, old_i in enumerate(conn_indices)}
+            self.nodes = self.nodes[conn_mask]
+            self.errors = self.errors[conn_mask]
+
             new_edges = {}
             for (u, v), age in self.edges.items():
                 if u in idx_map and v in idx_map:
-                    new_edges[tuple(sorted((idx_map[u], idx_map[v])))] = age
+                    nu, nv = idx_map[u], idx_map[v]
+                    new_edges[(nu, nv) if nu < nv else (nv, nu)] = age
             self.edges = new_edges
-        self.adj = {}
-        for u, v in self.edges.keys():
-            self.adj.setdefault(u, set()).add(v)
-            self.adj.setdefault(v, set()).add(u)
+
+            self.adj = {}
+            for u, v in self.edges.keys():
+                self.adj.setdefault(u, set()).add(v)
+                self.adj.setdefault(v, set()).add(u)
+
+            self.cached_radii = None
 
     def update(self, vector):
-        vector = np.asarray(vector, dtype=float)
+        vector = np.asarray(vector, dtype=np.float64)
         if self.dim is None:
             self.dim = len(vector)
+            self.nodes = np.empty((0, self.dim), dtype=np.float64)
 
         self.cached_radii = None
 
-        if len(self.nodes) < 2:
-            self.nodes.append(vector.copy())
-            self.errors.append(0.0)
-            if len(self.nodes) == 2:
+        if self.num_nodes < 2:
+            self.nodes = np.vstack([self.nodes, vector])
+            self.errors = np.append(self.errors, 0.0)
+            if self.num_nodes == 2:
                 self._add_edge(0, 1, age=0)
             return
 
         self.update_count += 1
-        norm_factor = np.sqrt(self.dim) if self.dim > 0 else 1.0
-        dists = [np.linalg.norm(vector - n) / norm_factor for n in self.nodes]
-        sorted_idx = np.argsort(dists)
-        s1, s2 = int(sorted_idx[0]), int(sorted_idx[1])
 
-        for (u, v) in list(self.edges.keys()):
-            if u == s1 or v == s1:
-                self.edges[(u, v)] += 1
+        diff = self.nodes - vector
+        dists = np.sqrt(np.sum(diff * diff, axis=1))
+        sorted_idx = np.argpartition(dists, 1)[:2]
+        if dists[sorted_idx[0]] > dists[sorted_idx[1]]:
+            s1, s2 = sorted_idx[1], sorted_idx[0]
+        else:
+            s1, s2 = sorted_idx[0], sorted_idx[1]
+
+        for edge in list(self.edges.keys()):
+            if edge[0] == s1 or edge[1] == s1:
+                self.edges[edge] += 1
 
         self.errors[s1] += dists[s1] ** 2
         self.nodes[s1] += self.eb * (vector - self.nodes[s1])
 
-        for (u, v) in self.edges.keys():
-            if u == s1:
-                self.nodes[v] += self.en * (vector - self.nodes[v])
-            elif v == s1:
-                self.nodes[u] += self.en * (vector - self.nodes[u])
+        nbrs = list(self.adj.get(s1, ()))
+        if nbrs:
+            self.nodes[nbrs] += self.en * (vector - self.nodes[nbrs])
 
         self._add_edge(s1, s2, age=0)
         self.tidy()
 
-        if self.update_count % self.lambda_step == 0 and len(self.nodes) < self.max_points:
+        if self.update_count % self.lambda_step == 0 and self.num_nodes < self.max_points:
             self._insert_node()
 
-        for i in range(len(self.errors)):
-            self.errors[i] *= self.d
+        self.errors *= self.d
 
     def serialize(self) -> dict:
         parameters = {
@@ -174,19 +216,19 @@ class GNG:
             "dim": self.dim,
         }
         edges_str_keys = {f"{u},{v}": age for (u, v), age in self.edges.items()}
-        radii = [float(self._get_local_radius(i)) for i in range(len(self.nodes))]
+        if self.cached_radii is None:
+            self._recompute_radii()
 
         return {
             "parameters": parameters,
-            "nodes": [n.tolist() for n in self.nodes],
+            "nodes": self.nodes.tolist(),
             "edges": edges_str_keys,
-            "local_radii": radii
+            "local_radii": self.cached_radii.tolist()
         }
 
     def deserialize(self, data: dict):
         if not data:
             return
-
         params = data.get("parameters", {})
         self.max_points = params.get("max_points", self.max_points)
         self.base_radius = params.get("base_radius", self.base_radius)
@@ -200,40 +242,39 @@ class GNG:
         self.dim = params.get("dim", self.dim)
 
         if "nodes" in data:
-            self.nodes = [np.array(n, dtype=float) for n in data["nodes"]]
-            self.errors = [0.0] * len(self.nodes)
-            if self.dim is None and self.nodes:
-                self.dim = len(self.nodes[0])
+            nodes_data = data["nodes"]
+            self.nodes = np.array(nodes_data, dtype=np.float64) if nodes_data else np.empty((0, self.dim or 0))
+            self.errors = np.zeros(len(self.nodes), dtype=np.float64)
+            if self.dim is None and len(self.nodes) > 0:
+                self.dim = self.nodes.shape[1]
 
         if "local_radii" in data:
-            self.cached_radii = data["local_radii"]
+            self.cached_radii = np.array(data["local_radii"], dtype=np.float64)
 
         if "edges" in data:
-            parsed_edges = {}
+            self.edges = {}
             for k, v in data["edges"].items():
                 u, v_node = map(int, k.split(","))
-                parsed_edges[(u, v_node)] = v
-            self.edges = parsed_edges
-
+                edge = (u, v_node) if u < v_node else (v_node, u)
+                self.edges[edge] = v
             self.adj = {}
-            for (u, v) in self.edges.keys():
+            for u, v in self.edges.keys():
                 self.adj.setdefault(u, set()).add(v)
                 self.adj.setdefault(v, set()).add(u)
 
 
 class Predicate:
-    """Predicate wrapping a GNG manifold over full or sliced active dimensions."""
+    """Predykat owijający rozmaitość GNG w pełnej lub zredukowanej podprzestrzeni."""
     def __init__(self, max_points=20, dim=None, base_radius=0.1, max_radius=1.0,
                  learning_rate_b=0.2, learning_rate_n=0.006,
                  max_edge_age=50, lambda_step=10, alpha=0.5, d=0.995):
-        params = dict(
+        self.gng = GNG(
             max_points=max_points, dim=dim, base_radius=base_radius, max_radius=max_radius,
             learning_rate_b=learning_rate_b, learning_rate_n=learning_rate_n,
             max_edge_age=max_edge_age, lambda_step=lambda_step, alpha=alpha, d=d
         )
-        self.gng = GNG(**params)
         self.dim = int(dim) if dim is not None else None
-        self.active_dimensions = list(range(self.dim)) if self.dim is not None else None
+        self.active_dimensions = np.arange(self.dim, dtype=int) if self.dim is not None else None
 
     @property
     def nodes(self):
@@ -241,60 +282,91 @@ class Predicate:
 
     def set_active_dimensions(self, dimensions=None):
         if dimensions is not None:
-            self.active_dimensions = [int(d) for d in dimensions]
+            self.active_dimensions = np.array(dimensions, dtype=int)
             self.dim = len(self.active_dimensions)
             self.gng.dim = self.dim
+            if self.gng.nodes.shape[1] != self.dim and self.gng.num_nodes == 0:
+                self.gng.nodes = np.empty((0, self.dim), dtype=np.float64)
         elif self.dim is not None:
-            self.active_dimensions = list(range(self.dim))
+            self.active_dimensions = np.arange(self.dim, dtype=int)
+            self.gng.dim = self.dim
+            if self.gng.nodes.shape[1] != self.dim and self.gng.num_nodes == 0:
+                self.gng.nodes = np.empty((0, self.dim), dtype=np.float64)
         else:
             print('\t[PREDICATE] Wrong active dimensions')
 
-    def _project_vector(self, vector, vector_dims=None):
-        vec = np.asarray(vector, dtype=float)
+    def _project_vector(self, vectors, vector_dims=None):
+        arr = np.asarray(vectors, dtype=np.float64)
         if self.active_dimensions is None:
-            return vec
+            return arr
+
+        is_single = (arr.ndim == 1)
+        if is_single:
+            arr = arr.reshape(1, -1)
+
+        act_dims = self.active_dimensions
 
         if vector_dims is not None:
-            dim_to_idx = {int(d): idx for idx, d in enumerate(vector_dims)}
-            if all(d in dim_to_idx for d in self.active_dimensions):
-                return np.array([vec[dim_to_idx[d]] for d in self.active_dimensions], dtype=float)
+            vector_dims = np.asarray(vector_dims, dtype=int)
+            if len(vector_dims) == 0 or len(act_dims) == 0:
+                return None
+
+            # 1. Zabezpieczone wyszukiwanie z użyciem sorter
+            sorter = np.argsort(vector_dims)
+            raw_idx = np.searchsorted(vector_dims, act_dims, sorter=sorter)
+            
+            # Zapobiegamy wyjściu poza zakres tablicy sorter
+            clipped_idx = np.clip(raw_idx, 0, len(vector_dims) - 1)
+            matched_indices = sorter[clipped_idx]
+
+            # 2. Sprawdzamy, czy WSZYSTKIE act_dims faktycznie istnieją w vector_dims
+            is_valid = (raw_idx < len(vector_dims)) & (vector_dims[matched_indices] == act_dims)
+            if np.all(is_valid):
+                proj = arr[:, matched_indices]
+                return proj[0] if is_single else proj
             return None
 
-        if len(vec) == len(self.active_dimensions):
-            return vec
+        # Wektor pełnowymiarowy: wycinamy kolumny
+        if arr.shape[1] > np.max(act_dims, initial=-1):
+            proj = arr[:, act_dims]
+            return proj[0] if is_single else proj
 
-        if len(vec) > max(self.active_dimensions, default=-1):
-            return vec[self.active_dimensions]
+        # Wektor o dokładnie dopasowanej liczbie kolumn do self.active_dimensions
+        if arr.shape[1] == len(act_dims):
+            return vectors
 
         return None
 
-    def update(self, vector):
-        vec = np.asarray(vector, dtype=float)
+    def update(self, vector, vector_dims=None):
+        vec = np.asarray(vector, dtype=np.float64)
         if self.dim is None:
             self.dim = len(vec)
             self.gng.dim = self.dim
+            if self.gng.nodes.shape[1] != self.dim and self.gng.num_nodes == 0:
+                self.gng.nodes = np.empty((0, self.dim), dtype=np.float64)
             if self.active_dimensions is None:
-                self.active_dimensions = list(range(self.dim))
+                self.active_dimensions = np.arange(self.dim, dtype=int)
 
-        projected = self._project_vector(vec)
+        projected = self._project_vector(vec, vector_dims=vector_dims)
         if projected is not None and len(projected) == self.dim:
             self.gng.update(projected)
 
-    def evaluate(self, vector, vector_dims=None) -> str:
-        projected = self._project_vector(vector, vector_dims=vector_dims)
+    def is_active(self, vectors, vector_dims=None):
+        """Obsługuje wektory 1D oraz 2D wsadowo."""
+        projected = self._project_vector(vectors, vector_dims=vector_dims)
         if projected is None:
-            return "FALSE"
-        return "TRUE" if self.gng.is_active(projected) else "FALSE"
+            arr = np.asarray(vectors)
+            return False if arr.ndim == 1 else np.zeros(len(arr), dtype=bool)
+        return self.gng.is_active(projected)
 
-    def is_active(self, vector, vector_dims=None) -> bool:
-        return self.evaluate(vector, vector_dims=vector_dims) == "TRUE"
+    def evaluate(self, vector, vector_dims=None) -> str:
+        return "TRUE" if bool(self.is_active(vector, vector_dims=vector_dims)) else "FALSE"
 
     def clone_subspace(self, target_dims=None, node_indices=None) -> "Predicate":
-        """Creates a new Predicate sliced to target_dims and/or filtered to node_indices."""
         if target_dims is None:
-            target_dims = list(self.active_dimensions) if self.active_dimensions is not None else []
+            target_dims = self.active_dimensions.copy() if self.active_dimensions is not None else np.array([], dtype=int)
         else:
-            target_dims = [int(d) for d in target_dims]
+            target_dims = np.array(target_dims, dtype=int)
 
         new_pred = Predicate(
             max_points=self.gng.max_points,
@@ -310,59 +382,61 @@ class Predicate:
         )
         new_pred.set_active_dimensions(target_dims)
 
-        if not self.nodes or not target_dims:
+        if self.gng.num_nodes == 0 or len(target_dims) == 0 or self.active_dimensions is None:
             return new_pred
 
-        if self.active_dimensions is not None:
-            dim_map = {int(d): i for i, d in enumerate(self.active_dimensions)}
-            local_cols = [dim_map[d] for d in target_dims if d in dim_map]
-        else:
-            local_cols = target_dims
-
-        if len(local_cols) != len(target_dims):
+        curr_dims = self.active_dimensions
+        if len(curr_dims) == 0:
             return new_pred
 
-        selected_nodes = list(range(len(self.nodes))) if node_indices is None else [int(i) for i in node_indices]
-        if not selected_nodes:
+        # 1. Bezpieczne wyszukiwanie z użyciem sorter
+        sorter = np.argsort(curr_dims)
+        raw_idx = np.searchsorted(curr_dims, target_dims, sorter=sorter)
+        
+        # Zapobiegamy wyjściu poza rozmiar tablicy (indeks len(curr_dims))
+        clipped_idx = np.clip(raw_idx, 0, len(curr_dims) - 1)
+        matched = sorter[clipped_idx]
+
+        # 2. Sprawdzamy, czy WSZYSTKIE target_dims faktycznie istnieją w curr_dims
+        # (jeśli raw_idx == len(curr_dims) lub wartość się nie zgadza, warunek nie zajdzie)
+        is_valid = (raw_idx < len(curr_dims)) & (curr_dims[matched] == target_dims)
+        if not np.all(is_valid):
+            # Brakuje części wymiarów (tak jak w candidate_joined w reduce_symbols) -> zwracamy pusty predykat
             return new_pred
 
-        old_to_new = {}
-        for old_idx in selected_nodes:
-            old_to_new[old_idx] = len(new_pred.gng.nodes)
-            sliced_vec = np.asarray(self.nodes[old_idx], dtype=float)[local_cols].copy()
-            new_pred.gng.nodes.append(sliced_vec)
-            err = self.gng.errors[old_idx] if old_idx < len(self.gng.errors) else 0.0
-            new_pred.gng.errors.append(err)
+        selected = np.arange(self.gng.num_nodes) if node_indices is None else np.asarray(node_indices, dtype=int)
+        if len(selected) == 0:
+            return new_pred
 
+        new_pred.gng.nodes = self.gng.nodes[selected][:, matched].copy()
+        new_pred.gng.errors = self.gng.errors[selected].copy()
+
+        old_to_new = {old_i: new_i for new_i, old_i in enumerate(selected)}
         for (u, v), age in self.gng.edges.items():
             if u in old_to_new and v in old_to_new:
                 new_pred.gng._add_edge(old_to_new[u], old_to_new[v], age=age)
 
-        # Fallback: connect nearest neighbors if filtering left nodes without edges
-        if len(new_pred.gng.nodes) >= 2 and not new_pred.gng.edges:
-            nodes_mat = np.asarray(new_pred.gng.nodes, dtype=float)
-            for i in range(len(nodes_mat)):
-                dists = np.linalg.norm(nodes_mat - nodes_mat[i], axis=1)
-                dists[i] = float("inf")
-                nearest = int(np.argmin(dists))
-                new_pred.gng._add_edge(i, nearest, age=0)
+        if new_pred.gng.num_nodes >= 2 and not new_pred.gng.edges:
+            dists = cdist(new_pred.gng.nodes, new_pred.gng.nodes)
+            np.fill_diagonal(dists, np.inf)
+            nearest = np.argmin(dists, axis=1)
+            for i, near_i in enumerate(nearest):
+                new_pred.gng._add_edge(i, near_i, age=0)
 
         return new_pred
 
     def save_predicate(self, log_dir, pred_name: str):
         if not log_dir:
             return
-
         os.makedirs(log_dir, exist_ok=True)
-
         data = {
             "gng": self.gng.serialize(),
             "dim": self.dim,
-            "active_dimensions": list(self.active_dimensions) if self.active_dimensions is not None else None,
+            "active_dimensions": self.active_dimensions.tolist() if self.active_dimensions is not None else None,
         }
-
+        unique_id = uuid.uuid4().hex
+        temp_file = os.path.join(log_dir, f"{pred_name}_{unique_id}.tmp")
         file_path = os.path.join(log_dir, f"{pred_name}.json")
-        temp_file = os.path.join(log_dir, f"{pred_name}.tmp")
 
         with open(temp_file, "w") as f:
             json.dump(data, f, indent=2)
@@ -392,10 +466,6 @@ class Predicate:
         self.dim = int(dim) if dim is not None else None
         self.gng = GNG(**params)
         self.gng.deserialize(gng_data)
-
-        if self.dim is None and self.gng.nodes:
-            self.dim = len(self.gng.nodes[0])
-            self.gng.dim = self.dim
 
         if dimensions is not None:
             self.set_active_dimensions(dimensions)

@@ -5,6 +5,7 @@
 
 # --- MINE ---
 environment/
+venv64/
 old/
 LicencjatKogni.slnx
 LicencjatKogni.pyproj

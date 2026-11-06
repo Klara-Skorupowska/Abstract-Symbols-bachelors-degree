@@ -27,7 +27,7 @@ class UpdateFrequencyPictureGenerator(PictureGenerator):
                 timestamps = [float(line.strip()) for line in f if line.strip()]
             img = self.renderer.create_base_canvas("UPDATE FREQUENCY OVER TIME")
             self.renderer.draw_frequency_plot(img, timestamps, bin_size_sec=self.bin_size_sec)
-            self.renderer.draw_sample_badge(img, n_pos=len(timestamps), position=(35, 595))
+            self.renderer.draw_sample_badge(img, count=len(timestamps), position=(35, 595))
 
             out_dir = self.get_pictures_dir() or "."
             out_path = os.path.join(out_dir, "update_frequency.png")

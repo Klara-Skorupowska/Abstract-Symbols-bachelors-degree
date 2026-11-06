@@ -4,24 +4,31 @@ import json
 import cv2
 import numpy as np
 
-from supervisor.picture_generator import PictureGenerator
-from supervisor.renderer import lower_median
+from supervisor.core.picture_generator import PictureGenerator
+from supervisor.core.renderer import lower_median
+from supervisor.utils.dir_utils import get_latest_epoch_dir
 
 
 def _find_pddl_gng_dir(session_path: str):
-    """Case-insensitive directory lookup for <session_path>/pddl/gng."""
+    """Case-insensitive directory lookup for <session_path>/pddl/gng or inside latest epoch."""
     if not session_path or not os.path.isdir(session_path):
         return None
 
-    for pddl_cand in ["pddl", "PDDL"]:
-        pddl_path = os.path.join(session_path, pddl_cand)
-        if os.path.isdir(pddl_path):
-            for gng_cand in ["gng", "GNG"]:
-                gng_path = os.path.join(pddl_path, gng_cand)
-                if os.path.isdir(gng_path):
-                    return gng_path
+    # Check session directory and its latest epoch directory
+    candidates = [session_path]
+    latest_epoch = get_latest_epoch_dir(session_path)
+    if latest_epoch and str(latest_epoch) != str(session_path):
+        candidates.insert(0, str(latest_epoch))
 
-    # Fallback to direct path
+    for base_dir in candidates:
+        for pddl_cand in ["pddl", "PDDL"]:
+            pddl_path = os.path.join(base_dir, pddl_cand)
+            if os.path.isdir(pddl_path):
+                for gng_cand in ["gng", "GNG"]:
+                    gng_path = os.path.join(pddl_path, gng_cand)
+                    if os.path.isdir(gng_path):
+                        return gng_path
+
     return os.path.join(session_path, "PDDL", "GNG")
 
 
@@ -91,6 +98,7 @@ class SymbolIconPictureGenerator(PictureGenerator):
             return
 
         out_dir = self.get_pictures_dir()
+        os.makedirs(out_dir, exist_ok=True)
         file_pattern = os.path.join(gng_dir, "sym_*.json")
 
         for json_path in glob.glob(file_pattern):
@@ -112,7 +120,7 @@ class SymbolIconPictureGenerator(PictureGenerator):
                 display_title = f"Symbol {symbol_num}"
                 img = self.renderer.create_base_canvas(
                     display_title,
-                    f"Symbol Icon: Center Prototype ({len(active_set)} active dims)"
+                    f"Symbol Icon"
                 )
 
                 self.renderer.draw_lidar(
@@ -125,7 +133,8 @@ class SymbolIconPictureGenerator(PictureGenerator):
                     active_ganglion=active_ganglion, active_cones=active_cones,
                     origin=(520, 120)
                 )
-                self.renderer.draw_sample_badge(img, n_pos=len(full_nodes), position=(35, 595))
+                self.renderer.draw_sample_badge(img, count=len(full_nodes), position=(35, 595))
+                self.renderer.draw_sample_badge(img, count=len(active_set), label="Active dimensions", position=(135, 595))
 
                 out_path = os.path.join(out_dir, f"{file_base}_icon.png")
                 cv2.imwrite(out_path, img)
@@ -162,20 +171,21 @@ class SymbolCategoryPictureGenerator(PictureGenerator):
                 symbol_num = file_base.split("_")[-1]
 
                 # Prototype statistics
-                min_vals = np.min(full_nodes, axis=0)
-                max_vals = np.max(full_nodes, axis=0)
                 median_vals = lower_median(full_nodes, axis=0)
+                mad = np.median(np.abs(full_nodes - median_vals), axis=0)
+                lower_limit_vals = median_vals - mad
+                upper_limit_vals = median_vals + mad
 
                 lidar_active, active_ganglion, active_cones = _build_masks(active_set)
 
                 display_title = f"Symbol {symbol_num}"
                 img = self.renderer.create_base_canvas(
                     display_title,
-                    f"Symbol Category: Min-Median-Max Manifold ({len(active_set)} active dims)"
+                    f"Symbol Category"
                 )
 
                 # 1. LIDAR (Min, Max, Median)
-                lidar_data = list(zip(min_vals[:8], max_vals[:8], median_vals[:8]))
+                lidar_data = list(zip(lower_limit_vals[:8], upper_limit_vals[:8], median_vals[:8]))
                 self.renderer.draw_lidar(
                     img, lidar_data, mode="categorical", active_flags=lidar_active
                 )
@@ -204,7 +214,8 @@ class SymbolCategoryPictureGenerator(PictureGenerator):
                     origin=(520, 120)
                 )
 
-                self.renderer.draw_sample_badge(img, n_pos=len(full_nodes), position=(35, 595))
+                self.renderer.draw_sample_badge(img, count=len(full_nodes), position=(35, 595))
+                self.renderer.draw_sample_badge(img, count=len(active_set), label="Active dimensions", position=(135, 595))
 
                 out_path = os.path.join(out_dir, f"{file_base}_category.png")
                 cv2.imwrite(out_path, img)

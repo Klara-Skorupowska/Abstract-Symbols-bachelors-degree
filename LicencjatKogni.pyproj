@@ -12,7 +12,7 @@
     <OutputPath>.</OutputPath>
     <Name>LicencjatKogni</Name>
     <RootNamespace>WaldekTheRobot</RootNamespace>
-    <InterpreterId>MSBuild|environment|$(MSBuildProjectFullPath)</InterpreterId>
+    <InterpreterId>MSBuild|venv64|$(MSBuildProjectFullPath)</InterpreterId>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>
@@ -25,6 +25,7 @@
   <ItemGroup>
     <Compile Include="additional_scripts\brain_viewer.py" />
     <Compile Include="additional_scripts\exec_stats.py" />
+    <Compile Include="additional_scripts\exec_stats_cumulative.py" />
     <Compile Include="additional_scripts\notes.py" />
     <Compile Include="additional_scripts\2D_predicate.py" />
     <Compile Include="additional_scripts\optimize_hyperparams.py" />
@@ -34,20 +35,8 @@
     <Compile Include="additional_scripts\transition_analysis.py" />
     <Compile Include="additional_scripts\tune_hypers.py" />
     <Compile Include="agent\predicate.py" />
+    <Compile Include="agent\session_utils.py" />
     <Compile Include="agent\symbol_generator.py" />
-    <Compile Include="supervisor\graph_from_pddl.py" />
-    <Compile Include="supervisor\live_monitor.py" />
-    <Compile Include="supervisor\picture_generator.py" />
-    <Compile Include="supervisor\pipeline_live.py" />
-    <Compile Include="supervisor\pipeline_pic_gen.py" />
-    <Compile Include="supervisor\renderer.py" />
-    <Compile Include="supervisor\sensimotor_live.py" />
-    <Compile Include="supervisor\symbols_live.py" />
-    <Compile Include="supervisor\symbol_pic_gen.py" />
-    <Compile Include="supervisor\trans_graph_live.py" />
-    <Compile Include="supervisor\trans_graph_pic_gen.py" />
-    <Compile Include="supervisor\update_freq_pic_gen.py" />
-    <Compile Include="supervisor\old_visualize.py" />
     <Compile Include="agent\core.py" />
     <Compile Include="agent\agent_loop.py" />
     <Compile Include="agent\brain_network.py" />
@@ -67,68 +56,35 @@
     <Compile Include="simulation\simulation_loop.py" />
     <Compile Include="main.py" />
     <Compile Include="simulation\__init__.py" />
-    <Compile Include="supervisor\core.py" />
+    <Compile Include="supervisor\core\live_monitor.py" />
+    <Compile Include="supervisor\core\picture_generator.py" />
+    <Compile Include="supervisor\core\renderer.py" />
+    <Compile Include="supervisor\core\__init__.py" />
+    <Compile Include="supervisor\generators\exec_stats.py" />
+    <Compile Include="supervisor\generators\histogram.py" />
+    <Compile Include="supervisor\generators\pipeline.py" />
+    <Compile Include="supervisor\generators\__init__.py" />
+    <Compile Include="supervisor\loggers\base.py" />
+    <Compile Include="supervisor\loggers\execution_stats.py" />
+    <Compile Include="supervisor\loggers\session_info.py" />
+    <Compile Include="supervisor\loggers\symbol_stats.py" />
+    <Compile Include="supervisor\loggers\test_summary.py" />
+    <Compile Include="supervisor\loggers\__init__.py" />
+    <Compile Include="supervisor\monitors\pipeline.py" />
+    <Compile Include="supervisor\monitors\sensimotor.py" />
+    <Compile Include="supervisor\monitors\symbols.py" />
+    <Compile Include="supervisor\monitors\trans_graph.py" />
+    <Compile Include="supervisor\monitors\__init__.py" />
+    <Compile Include="supervisor\scraping\cumulative.py" />
+    <Compile Include="supervisor\scraping\__init__.py" />
+    <Compile Include="supervisor\supervisor.py" />
     <Compile Include="supervisor\supervisor_loop.py" />
+    <Compile Include="supervisor\utils\core_utils.py" />
+    <Compile Include="supervisor\utils\dir_utils.py" />
+    <Compile Include="supervisor\utils\__init__.py" />
     <Compile Include="supervisor\__init__.py" />
   </ItemGroup>
   <ItemGroup>
-    <Interpreter Include="environment\">
-      <Id>environment</Id>
-      <Version>3.9</Version>
-      <Description>environment (Python 3.9 (64-bit))</Description>
-      <InterpreterPath>Scripts\python.exe</InterpreterPath>
-      <WindowsInterpreterPath>Scripts\pythonw.exe</WindowsInterpreterPath>
-      <PathEnvironmentVariable>PYTHONPATH</PathEnvironmentVariable>
-      <Architecture>X64</Architecture>
-    </Interpreter>
-  </ItemGroup>
-  <ItemGroup>
-    <Folder Include="logs\" />
-    <Folder Include="logs\2026-09-03_13-46\" />
-    <Folder Include="logs\2026-09-03_13-46\graphs\" />
-    <Folder Include="logs\2026-09-03_13-46\graphs\final\" />
-    <Folder Include="logs\2026-09-03_13-46\graphs\live\" />
-    <Folder Include="logs\2026-09-03_13-46\PDDL\" />
-    <Folder Include="logs\2026-09-03_13-46\PDDL\symbols\" />
-    <Folder Include="logs\2026-09-03_13-46\PDDL\symbols\pictures\" />
-    <Folder Include="logs\2026-09-03_14-59\" />
-    <Folder Include="logs\2026-09-03_14-59\graphs\" />
-    <Folder Include="logs\2026-09-03_14-59\graphs\final\" />
-    <Folder Include="logs\2026-09-03_14-59\graphs\live\" />
-    <Folder Include="logs\2026-09-03_14-59\PDDL\" />
-    <Folder Include="logs\2026-09-03_15-39\" />
-    <Folder Include="logs\2026-09-03_15-39\graphs\" />
-    <Folder Include="logs\2026-09-03_15-39\graphs\final\" />
-    <Folder Include="logs\2026-09-03_15-39\graphs\live\" />
-    <Folder Include="logs\2026-09-03_15-39\PDDL\" />
-    <Folder Include="logs\2026-09-03_15-49\" />
-    <Folder Include="logs\2026-09-03_15-49\graphs\" />
-    <Folder Include="logs\2026-09-03_15-49\graphs\final\" />
-    <Folder Include="logs\2026-09-03_15-49\graphs\live\" />
-    <Folder Include="logs\2026-09-03_15-49\PDDL\" />
-    <Folder Include="logs\2026-09-03_15-59\" />
-    <Folder Include="logs\2026-09-03_15-59\graphs\" />
-    <Folder Include="logs\2026-09-03_15-59\graphs\final\" />
-    <Folder Include="logs\2026-09-03_15-59\graphs\final\pictures\" />
-    <Folder Include="logs\2026-09-03_15-59\graphs\live\" />
-    <Folder Include="logs\2026-09-03_15-59\PDDL\" />
-    <Folder Include="logs\2026-09-03_15-59\PDDL\symbols\" />
-    <Folder Include="logs\2026-09-03_15-59\PDDL\symbols\pictures\" />
-    <Folder Include="logs\2026-09-03_18-35\" />
-    <Folder Include="logs\2026-09-03_18-35\graphs\" />
-    <Folder Include="logs\2026-09-03_18-35\graphs\final\" />
-    <Folder Include="logs\2026-09-03_18-35\graphs\final\pictures\" />
-    <Folder Include="logs\2026-09-03_18-35\graphs\live\" />
-    <Folder Include="logs\2026-09-03_18-35\PDDL\" />
-    <Folder Include="logs\2026-09-03_18-35\PDDL\symbols\" />
-    <Folder Include="logs\2026-09-03_18-35\PDDL\symbols\pictures\" />
-    <Folder Include="logs\2026-09-03_18-55\" />
-    <Folder Include="logs\2026-09-03_18-55\graphs\" />
-    <Folder Include="logs\2026-09-03_18-55\graphs\final\" />
-    <Folder Include="logs\2026-09-03_18-55\graphs\final\pictures\" />
-    <Folder Include="logs\2026-09-03_18-55\graphs\live\" />
-    <Folder Include="logs\2026-09-03_18-55\PDDL\" />
-    <Folder Include="logs\2026-09-03_18-55\PDDL\symbols\" />
     <Folder Include="models\" />
     <Folder Include="models\urdfs\" />
     <Folder Include="additional_scripts\" />
@@ -872,87 +828,19 @@
     <Folder Include="results\2026-09-15_03-27\PDDL\GNG\" />
     <Folder Include="results\2026-09-15_03-27\PDDL\newest\" />
     <Folder Include="results\2026-09-15_03-27\pictures\" />
-    <Folder Include="supervisor\" />
     <Folder Include="simulation\" />
     <Folder Include="agent\" />
+    <Folder Include="supervisor\" />
+    <Folder Include="supervisor\core\" />
+    <Folder Include="supervisor\generators\" />
+    <Folder Include="supervisor\loggers\" />
+    <Folder Include="supervisor\monitors\" />
+    <Folder Include="supervisor\scraping\" />
+    <Folder Include="supervisor\utils\" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="additional_scripts\histogram_plot.py" />
     <Content Include="models\arena_color.xacro" />
-    <Content Include="logs\2026-09-03_13-46\graphs\final\gng_graph.json" />
-    <Content Include="logs\2026-09-03_13-46\graphs\final\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_13-46\graphs\live\gng_graph.json" />
-    <Content Include="logs\2026-09-03_13-46\graphs\live\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_13-46\PDDL\symbols\ClearThePath_effect.txt" />
-    <Content Include="logs\2026-09-03_13-46\PDDL\symbols\ClearThePath_precondition.txt" />
-    <Content Include="logs\2026-09-03_13-46\PDDL\symbols\GoToTheDoor_effect.txt" />
-    <Content Include="logs\2026-09-03_13-46\PDDL\symbols\GoToTheDoor_precondition.txt" />
-    <Content Include="logs\2026-09-03_13-46\PDDL\symbols\pictures\ClearThePath_effect_visualised.png" />
-    <Content Include="logs\2026-09-03_13-46\PDDL\symbols\pictures\ClearThePath_precondition_visualised.png" />
-    <Content Include="logs\2026-09-03_13-46\PDDL\symbols\pictures\GoToTheDoor_effect_visualised.png" />
-    <Content Include="logs\2026-09-03_13-46\PDDL\symbols\pictures\GoToTheDoor_precondition_visualised.png" />
-    <Content Include="logs\2026-09-03_13-46\skills_execution.txt" />
-    <Content Include="logs\2026-09-03_14-59\graphs\final\gng_graph.json" />
-    <Content Include="logs\2026-09-03_14-59\graphs\final\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_14-59\graphs\live\gng_graph.json" />
-    <Content Include="logs\2026-09-03_14-59\graphs\live\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_14-59\PDDL\domain.pddl" />
-    <Content Include="logs\2026-09-03_14-59\PDDL\problem.pddl" />
-    <Content Include="logs\2026-09-03_14-59\PDDL\problem.pddl.soln" />
-    <Content Include="logs\2026-09-03_14-59\skills_execution.txt" />
-    <Content Include="logs\2026-09-03_15-39\graphs\final\gng_graph.json" />
-    <Content Include="logs\2026-09-03_15-39\graphs\final\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_15-39\graphs\live\gng_graph.json" />
-    <Content Include="logs\2026-09-03_15-39\graphs\live\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_15-39\skills_execution.txt" />
-    <Content Include="logs\2026-09-03_15-49\graphs\final\gng_graph.json" />
-    <Content Include="logs\2026-09-03_15-49\graphs\final\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_15-49\graphs\live\gng_graph.json" />
-    <Content Include="logs\2026-09-03_15-49\graphs\live\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_15-49\skills_execution.txt" />
-    <Content Include="logs\2026-09-03_15-59\graphs\final\gng_graph.json" />
-    <Content Include="logs\2026-09-03_15-59\graphs\final\pictures\gng_graph_visualised.png" />
-    <Content Include="logs\2026-09-03_15-59\graphs\final\pictures\transitional_graph_visualised.png" />
-    <Content Include="logs\2026-09-03_15-59\graphs\final\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_15-59\graphs\live\gng_graph.json" />
-    <Content Include="logs\2026-09-03_15-59\graphs\live\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\ClearThePath_effect.txt" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\ClearThePath_precondition.txt" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\GoToTheDoor_effect.txt" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\GoToTheDoor_precondition.txt" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\pictures\ClearThePath_effect_visualised.png" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\pictures\ClearThePath_precondition_visualised.png" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\pictures\GoToTheDoor_effect_visualised.png" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\pictures\GoToTheDoor_precondition_visualised.png" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\pictures\SpotTheColor_effect_visualised.png" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\pictures\SpotTheColor_precondition_visualised.png" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\SpotTheColor_effect.txt" />
-    <Content Include="logs\2026-09-03_15-59\PDDL\symbols\SpotTheColor_precondition.txt" />
-    <Content Include="logs\2026-09-03_15-59\skills_execution.txt" />
-    <Content Include="logs\2026-09-03_18-35\graphs\final\gng_graph.json" />
-    <Content Include="logs\2026-09-03_18-35\graphs\final\pictures\gng_graph_visualised.png" />
-    <Content Include="logs\2026-09-03_18-35\graphs\final\pictures\transitional_graph_visualised.png" />
-    <Content Include="logs\2026-09-03_18-35\graphs\final\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_18-35\graphs\live\gng_graph.json" />
-    <Content Include="logs\2026-09-03_18-35\graphs\live\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_18-35\PDDL\symbols\GoToTheDoor_effect.txt" />
-    <Content Include="logs\2026-09-03_18-35\PDDL\symbols\GoToTheDoor_precondition.txt" />
-    <Content Include="logs\2026-09-03_18-35\PDDL\symbols\pictures\GoToTheDoor_effect_visualised.png" />
-    <Content Include="logs\2026-09-03_18-35\PDDL\symbols\pictures\GoToTheDoor_precondition_visualised.png" />
-    <Content Include="logs\2026-09-03_18-35\PDDL\symbols\pictures\SpotTheColor_effect_visualised.png" />
-    <Content Include="logs\2026-09-03_18-35\PDDL\symbols\pictures\SpotTheColor_precondition_visualised.png" />
-    <Content Include="logs\2026-09-03_18-35\PDDL\symbols\SpotTheColor_effect.txt" />
-    <Content Include="logs\2026-09-03_18-35\PDDL\symbols\SpotTheColor_precondition.txt" />
-    <Content Include="logs\2026-09-03_18-35\skills_execution.txt" />
-    <Content Include="logs\2026-09-03_18-55\graphs\final\gng_graph.json" />
-    <Content Include="logs\2026-09-03_18-55\graphs\final\pictures\gng_graph_visualised.png" />
-    <Content Include="logs\2026-09-03_18-55\graphs\final\pictures\transitional_graph_visualised.png" />
-    <Content Include="logs\2026-09-03_18-55\graphs\final\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_18-55\graphs\live\gng_graph.json" />
-    <Content Include="logs\2026-09-03_18-55\graphs\live\transitional_graph.graphml" />
-    <Content Include="logs\2026-09-03_18-55\PDDL\domain.pddl" />
-    <Content Include="logs\2026-09-03_18-55\PDDL\problem.pddl" />
-    <Content Include="logs\2026-09-03_18-55\skills_execution.txt" />
     <Content Include="models\cube.xacro" />
     <Content Include="models\arena.xacro" />
     <Content Include="models\epuck2.xacro" />
@@ -961,6 +849,7 @@
     <Content Include="models\urdfs\arena_GoForward.urdf" />
     <Content Include="models\urdfs\arena_OpenDoor.urdf" />
     <Content Include="models\urdfs\epuck2.urdf" />
+    <Content Include="requirements.txt" />
     <Content Include="results\2026-09-05_21-20\execution_statistics.txt" />
     <Content Include="results\2026-09-05_21-20\graphs\gng_graph.json" />
     <Content Include="results\2026-09-05_21-20\graphs\pictures\gng_graph_visualised.png" />
@@ -3218,6 +3107,20 @@
     <Content Include="results\2026-09-15_03-27\timestamps.txt" />
     <Content Include="todos.txt" />
     <Content Include="what_next.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <InterpreterReference Include="Global|PythonCore|3.13" />
+  </ItemGroup>
+  <ItemGroup>
+    <Interpreter Include="venv64\">
+      <Id>venv64</Id>
+      <Version>3.13</Version>
+      <Description>venv64 (Python 3.13)</Description>
+      <InterpreterPath>Scripts\python.exe</InterpreterPath>
+      <WindowsInterpreterPath>Scripts\pythonw.exe</WindowsInterpreterPath>
+      <PathEnvironmentVariable>PYTHONPATH</PathEnvironmentVariable>
+      <Architecture>X64</Architecture>
+    </Interpreter>
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

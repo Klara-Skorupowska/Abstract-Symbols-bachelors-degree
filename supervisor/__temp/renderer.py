@@ -110,11 +110,8 @@ class Renderer:
 
         return median_bgr, circ_var
 
-    def draw_sample_badge(self, img, n_pos, position=(35, 595), overlap_ratio=None):
-        text = f"Prototypes: {n_pos} TRUE (+)"
-        if overlap_ratio is not None:
-            text += f" | Overlap: {overlap_ratio * 100:.1f}%"
-
+    def draw_sample_badge(self, img, count: int, label: str = "Nodes", position=(90, 595)):
+        text = f"{label}: {count}"
         font = cv2.FONT_HERSHEY_SIMPLEX
         scale = 0.45
         thickness = 1
@@ -220,7 +217,7 @@ class Renderer:
         rf_start_x, rf_start_y = origin[0], origin[1]
         c_start_x, c_start_y = origin[0], origin[1] + 260
 
-        cv2.putText(img, "Retinal Ganglion Cells", (rf_start_x, rf_start_y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, self.TEXT_MAIN, 2, cv2.LINE_AA)
+        cv2.putText(img, "Retinal Ganglion Cells Receptive Fields", (rf_start_x, rf_start_y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, self.TEXT_MAIN, 2, cv2.LINE_AA)
         cv2.putText(img, "Cone Cells", (c_start_x, c_start_y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, self.TEXT_MAIN, 2, cv2.LINE_AA)
 
         for r in range(rows):

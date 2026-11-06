@@ -6,7 +6,7 @@ from .symbols_live import SymbolsLive
 class PipelineLiveMonitor(LiveMonitor):
     def setup(self):
         self.monitors = [
-                TransGraphLive(self.bus, "Transition Graph"),
+                #TransGraphLive(self.bus, "Transition Graph"),
                 #LiveSensimotorMonitor(self.bus, "Sensimotor Monitor"),
                 SymbolsLive(self.bus, "Current Symbols")
             ]

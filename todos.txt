@@ -10,6 +10,24 @@
 ()  - zrobione, a nie było planowane
 ---------------------------------------
 ---------------------------------------
+
+### 05.11.2026 ###
+[] poprawić renderowanie... (braki w strukturze)
+[!] analiza wpływu hiperparametrów - kod i wykresy
+
+### 30.10.2026 ###
+[o] zmienić przypisywanie symboli do skilli - robić to na etapie abstrahowania, i dopisywać później* inne
+[o] *później  na etapie kumulowania skilli: przyjrzeć się czy dobrze działa
+[o] agregate - podczas abstrahowania danego skilla
+[o] domain.pddl file generation - jeżeli coś się zmieniło w strukturze symboli (był jakiś update) - poczas updat'u
+[!] analiza wpływu hiperparametrów - kod i wykresy
+
+### 26.10.2026 ###
+[o] poprawić co zauważyłam w pociągu
+[] dodać pełniejsze statystyki nauczania
+[o] dodać: zbiera z exec stats (wszystkie sesje) collected data, executions i wyświetla wykresy: sesja x ilość x skill
+[] z testów: jaka jest ścieżka, na czym wybucha
+
 ### 19.10.2026 ###
 [o] dopisać generowanie graficznych symboli 
 [] dodać monitorowanie nauczania live
@@ -62,7 +80,7 @@ eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee działo się
 [o] Obrazki: dla wszystkich lidarów min-max i średnia, kolory osobno liczyć ich wariancję, zmienne rzeczy w kolorze tła / przezroczyste, info z ilu punktów składa się ten predykat
 [x] zapisać timestamps updatów --> zapisuje ile było batchy i to idzie do statystyk
 [0] zapisać timestamps add_to_buffor --> zapisuje i rysuje histogram
-[] skillerror = close everything safetly
+[x] skillerror = close everything safetly
 
 ### 06.09.2026 ###
 [o] włożyć GNG do środka !!! I AM A GENIUS
@@ -99,7 +117,7 @@ eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee działo się
 ### 05.08.2026 ###
 [~] poprawić zapisywanie logów: folder z czasem startu symulacji, czas trwania do znalezienia celu, ile razy wszedł w explore
 [o] poprawić zapisywanie pddl: timestamp żeby nie tracić po każdym rerun
-[] program do używania gotowego, tj. re-run z włączonym odczytem tego co już było = pierwszy plan jakiś jest = w idealnym świecie od razu działa, a po zmianie areny po czasie krótszym niż szukanie na oślep
+[o] program do używania gotowego, tj. re-run z włączonym odczytem tego co już było = pierwszy plan jakiś jest = w idealnym świecie od razu działa, a po zmianie areny po czasie krótszym niż szukanie na oślep
 [o] wizualizacje: symbole (kolory 3x3, linie, dystanse), sieci (nodes, edges, errors), 
 [o] poprawić skill otwierania drzwi bo nie działa -- dodać akcelerometr?
 [o] co zrobić aby gdy nie ma celu tworzył działające ścieżki? dokąd powinien iść? na skraj tego co zna. Jak to określić? GNG? Losuje z grafu przejść

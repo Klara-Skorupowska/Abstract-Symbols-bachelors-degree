@@ -511,6 +511,7 @@ class Finish(SerialSkill):
         if in_goal_zone and facing_goal:
             print(f"\t[Skill] {self.__class__.__name__} succeed. Restart needed.")
             self.bus.publish("/supervisor/event/reset", {"reason": "finish"})
+            time.sleep(1.0)
             return True
         
         mssg = ""
@@ -545,4 +546,156 @@ class Start(SerialSkill):
             print(f"\t[Skill] {self.__class__.__name__} succeed.")
             return True
         print(f"\t[Skill] {self.__class__.__name__} failed. Wrong room.")
+        return False
+
+class ApproachCenterColor(SerialSkill):
+    """
+    1. Samples the color hue in the center of the camera frame.
+    2. Backs up first if it initialized too close to the obstacle.
+    3. Visually steers toward that target object regardless of initial angle.
+    4. Uses front LiDAR beams to approach, align perpendicularly, and stop at min_dist.
+    """
+    def __init__(
+        self,
+        camera: CameraSensor,
+        lidars: VirtualSensorArray,
+        wheels: VirtualActuator,
+        velocity: float,
+        min_dist: float,
+        timeout: float = 15.0,
+        epsilon: float = 0.01,
+        hue_tol: int = 10,
+        kp_steer: float = 0.8,
+        backoff_buffer: float = 0.05
+    ):
+        super().__init__(camera, lidars, wheels, velocity, min_dist, timeout)
+        self.min_dist = min_dist
+        self.epsilon = epsilon
+        self.hue_tol = hue_tol
+        self.kp_steer = kp_steer
+        self.backoff_buffer = backoff_buffer
+
+    def _sample_center_hue(self, frame: np.ndarray) -> int:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        h, w = hsv.shape[:2]
+        cy, cx = h // 2, w // 2
+        patch = hsv[max(0, cy - 3):min(h, cy + 4), max(0, cx - 3):min(w, cx + 4), 0]
+        return int(np.median(patch))
+
+    def _create_hue_mask(self, hsv_frame: np.ndarray, target_hue: int) -> np.ndarray:
+        lower_hue = target_hue - self.hue_tol
+        higher_hue = target_hue + self.hue_tol
+
+        if lower_hue < 0:
+            mask1 = cv2.inRange(hsv_frame, np.array([0, 50, 50]), np.array([higher_hue, 255, 255]))
+            mask2 = cv2.inRange(hsv_frame, np.array([180 + lower_hue, 50, 50]), np.array([180, 255, 255]))
+            return cv2.bitwise_or(mask1, mask2)
+        elif higher_hue > 180:
+            mask1 = cv2.inRange(hsv_frame, np.array([lower_hue, 50, 50]), np.array([180, 255, 255]))
+            mask2 = cv2.inRange(hsv_frame, np.array([0, 50, 50]), np.array([higher_hue - 180, 255, 255]))
+            return cv2.bitwise_or(mask1, mask2)
+        else:
+            return cv2.inRange(hsv_frame, np.array([lower_hue, 50, 50]), np.array([higher_hue, 255, 255]))
+
+    def _get_target_offset(self, frame: np.ndarray, target_hue: int):
+        scale = 0.5
+        w = int(frame.shape[1] * scale)
+        h = int(frame.shape[0] * scale)
+        small_frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
+        mask = self._create_hue_mask(hsv, target_hue)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        largest_contour = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest_contour) < 100:
+            return None
+
+        M = cv2.moments(largest_contour)
+        if M["m00"] == 0:
+            return None
+
+        cx = M["m10"] / M["m00"]
+        return (cx - (w / 2.0)) / (w / 2.0)
+
+    def _get_front_lidar_distances(self, lidars_data):
+        if isinstance(lidars_data, (list, tuple, np.ndarray)):
+            return float(lidars_data[0]), float(lidars_data[1])
+        elif hasattr(lidars_data, "read"):
+            return lidars_data.read("front_left"), lidars_data.read("front_right")
+        return float(lidars_data), float(lidars_data)
+
+    def execute(self) -> bool:
+        print(f"\t[Skill] Executing {self.__class__.__name__} skill.")
+        start_time = time.time()
+
+        # Step 1: Lock target hue from center
+        frame, _ = self.read_sensors()
+        if frame is None:
+            return False
+        target_hue = self._sample_center_hue(frame)
+        print(f"\t[Skill] Target hue: {target_hue}.")
+
+        # Step 2: Full-speed charge toward target until right in front of it
+        while time.time() - start_time < self.timeout:
+            frame, lidars_data = self.read_sensors()
+            if frame is None or lidars_data is None:
+                continue
+
+            d_left, d_right = self._get_front_lidar_distances(lidars_data)
+            
+            # Stop charging when closest beam hits min_dist
+            if min(d_left, d_right) <= self.min_dist:
+                self.wheels.set_parameters([0.0, 0.0])
+                break
+
+            offset = self._get_target_offset(frame, target_hue)
+            if offset is not None:
+                # Steer at full cruising speed
+                turn = offset * self.velocity * self.kp_steer
+                self.wheels.set_parameters([self.velocity + turn, self.velocity - turn])
+            else:
+                self.wheels.set_parameters([self.velocity, self.velocity])
+
+            time.sleep(0.005)
+
+        # Step 3: Fast snap-alignment (turn in place until lidars equalize)
+        align_tol = self.epsilon
+        turn_speed = self.velocity * 0.6 # Snappy rotation speed
+        
+        d_left, d_right = self._get_front_lidar_distances(lidars_data)
+        angle_error = d_left - d_right
+        if angle_error < 0:
+            turn_speed = - turn_speed
+
+        while time.time() - start_time < self.timeout:
+            _, lidars_data = self.read_sensors()
+            if lidars_data is None:
+                continue
+
+            d_left, d_right = self._get_front_lidar_distances(lidars_data)
+            angle_error = d_left - d_right
+
+            # Perpendicular enough -> instant stop and success
+            if abs(angle_error) <= align_tol and max(d_left, d_right) <= self.min_dist:
+                self.wheels.set_parameters([0.0, 0.0])
+                # check if it's in the center
+                frame, _ = self.read_sensors()
+                if frame is None:
+                    return False
+                if self._get_target_offset(frame, target_hue) is not None:
+                    print(f"\t[Skill] {self.__class__.__name__} failed. Target not in center.")
+                    return False
+                print(f"\t[Skill] {self.__class__.__name__} success.")
+                return True
+
+            self.wheels.set_parameters([turn_speed, -turn_speed])
+
+            time.sleep(0.005)
+
+        self.wheels.set_parameters([0.0, 0.0])
+        print(f"\t[Skill] {self.__class__.__name__} failed. Timeout.")
         return False
