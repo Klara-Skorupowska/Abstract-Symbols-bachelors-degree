@@ -13,6 +13,7 @@
 
 ### 05.11.2026 ###
 [] poprawić renderowanie... (braki w strukturze)
+[] przejrzeć abtrahowanie: wszytko ma się dziać na poziomie stanów, nie wymiarów
 [!] analiza wpływu hiperparametrów - kod i wykresy
 
 ### 30.10.2026 ###
