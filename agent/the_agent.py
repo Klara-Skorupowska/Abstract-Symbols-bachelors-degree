@@ -207,8 +207,8 @@ class TheAgent(Agent):
                 plan_completed = True
                 for i, skill_name in enumerate(plan):
                     print(f"[Agent] Executing step {i+1}/{len(plan)}: {skill_name}")
-                    state_now = self.read_state()
-                    status = self.brain.predicates_status(skill_name, state_now)
+                    state_before, _ = self.read_state()
+                    status = self.brain.predicates_status(skill_name, state_before)
 
                     success = self.execute_skill(skill_name)
                     if not success:
@@ -216,12 +216,14 @@ class TheAgent(Agent):
                         plan_completed = False
                         break
 
-                    state_now = self.read_state()
-                    status = self.brain.predicates_status(skill_name, state_now)
+                    state_after, _ = self.read_state()
+                    status = self.brain.predicates_status(skill_name, state_after)
                     if status != 'EFFECTS':
                         print("[Agent] Effects not there. Abandoning the plan.")
                         plan_completed = False
                         break
+
+                    self.add_to_buffer((state_before, skill_name, state_after))
 
                 if plan_completed:
                     self.completed_plans_count += 1
@@ -252,13 +254,13 @@ class TheAgent(Agent):
     def execute_skill(self, skill_name: str) -> bool:
         print(f"[Agent] Execute Skill: {skill_name}")
         self.current_skill = skill_name
-        prev_vector_state = self.read_state()
+        prev_vector_state, _ = self.read_state()
         self.brain.create_node(skill_name)
 
         preconditions_are_met = self.brain.preconditions_met(skill_name, prev_vector_state)
         skill = self.skillset[skill_name]
         succeed = skill.execute()
-        post_vector_state = self.read_state()
+        post_vector_state, _ = self.read_state()
 
         self.record_transition(prev_vector_state, skill_name, post_vector_state, succeed)
 
@@ -270,7 +272,6 @@ class TheAgent(Agent):
         else:
             if succeed:
                 self.skill_stats[skill_name]['false_negative'] += 1
-                self.add_to_buffer((prev_vector_state, skill_name, post_vector_state))
             else:
                 self.skill_stats[skill_name]['true_negative'] += 1
 
@@ -281,7 +282,12 @@ class TheAgent(Agent):
         self.camera.read()
         self.camera.preprocess()
         self.lidars.preprocess()
-        return np.concatenate([self.lidars.coded, self.camera.coded]).flatten()
+
+        vector_state = np.concatenate([self.lidars.coded, self.camera.coded]).flatten()
+
+        active_symbols = self.brain.get_active_symbols(vector_state)
+
+        return vector_state, active_symbols
 
     def explore(self):
         print("[Agent] Explore")
@@ -315,9 +321,8 @@ class TheAgent(Agent):
 
     def generate_plan(self, goal_skill: str | None = None, plan_name: str | None = None) -> list[str]:
         print("[Agent] Generate Plan")
-        vector_state = self.read_state()
+        vector_state, active_symbols = self.read_state()
 
-        active_symbols = self.brain.get_active_symbols(vector_state)
         if not active_symbols:
             print("[Agent] No active symbols detected.")
             return []
@@ -442,7 +447,7 @@ class TheAgent(Agent):
                 print(f"[Agent] Executing plan: {plan}")
                 for step, skill_name in enumerate(plan):
                     print(f"[Agent] Executing step {step+1}/{len(plan)}: {skill_name}")
-                    state_now = self.read_state()
+                    state_now, _ = self.read_state()
                     status = self.brain.predicates_status(skill_name, state_now)
                     if status != "PRECONDITIONS":
                         print(f"[Agent] Preconditions are not met: {skill_name}")
@@ -461,7 +466,7 @@ class TheAgent(Agent):
                     test_record["last_step"] = skill_name
                     test_record["steps_executed"] = step + 1
 
-                    state_now = self.read_state()
+                    state_now, _ = self.read_state()
                     status = self.brain.predicates_status(skill_name, state_now)
                     if status != "EFFECTS":
                         print(f"[Agent] Effects are not met: {skill_name}")
