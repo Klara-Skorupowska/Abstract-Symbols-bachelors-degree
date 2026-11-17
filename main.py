@@ -62,12 +62,12 @@ def main(config: dict):
 
 if __name__ == "__main__":
     hyperparameters = {
-        "source_dir": "new",          
+        "source_dir": "continue",          
         "runs_per_epoch": 1000,        
         "tests_between": 5,           
         "tests_at_end": 100,           
         "time_limit": None,            
         "min_success_rate": 0.75,      
-        "max_epochs": 100              
+        "max_epochs": 50              
     }
     main(hyperparameters)

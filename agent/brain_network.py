@@ -18,10 +18,9 @@ class BrainNetwork:
         self.skills: dict[str, dict[str, Predicate]] = {}
 
         ### HYPERPARAMETERS ###
-        self.precision: float = 0.9          # Acceptance threshold for overlap/equivalence
+        self.precision: float = 0.95         # Acceptance threshold for overlap/equivalence
         self.n_test_points: int = 100        # Number of random points in symbol space for testing
-        self.min_nodes: int | None = None    # Minimum nodes in symbol; None defaults to predicate count
-        self.span_tolerance: float = 0.1     # Acceptable changes in value (% of min-max span)
+        self.min_nodes: int | None = 2       # Minimum nodes in symbol; None defaults to predicate count
 
         self.max_nodes: int = 40
         self.base_radius: float = 0.1
@@ -37,7 +36,6 @@ class BrainNetwork:
         self.symbol_gen = SymbolGenerator(
             precision=self.precision,
             min_nodes_in_symbol=self.min_nodes,
-            span_tolerance=self.span_tolerance,
             n_test_points=self.n_test_points,
         )
 
@@ -104,13 +102,14 @@ class BrainNetwork:
             return False
 
         skill_map = self.symbol_gen.get_skill_map()
-        required_symbols = skill_map.get(skill_name, {}).get("effect", set())
-        if not required_symbols:
+        effect_symbols = skill_map.get(skill_name, {}).get("effect", set())
+        if not effect_symbols:
             return False
 
-        return all(
+        # Partitioned symbols are mutually disjoint pieces covering the original region
+        return any(
             sym in symbols_map and symbols_map[sym].is_active(state_vector)
-            for sym in required_symbols
+            for sym in effect_symbols
         )
 
     def preconditions_met(self, skill_name: str, state_vector: np.ndarray) -> bool:
@@ -123,13 +122,14 @@ class BrainNetwork:
             return False
 
         skill_map = self.symbol_gen.get_skill_map()
-        required_symbols = skill_map.get(skill_name, {}).get("precondition", set())
-        if not required_symbols:
+        precondition_symbols = skill_map.get(skill_name, {}).get("precondition", set())
+        if not precondition_symbols:
             return False
 
-        return all(
+        # Partitioned symbols are mutually disjoint pieces covering the original region
+        return any(
             sym in symbols_map and symbols_map[sym].is_active(state_vector)
-            for sym in required_symbols
+            for sym in precondition_symbols
         )
 
     def predicates_status(self, skill_name: str, state_vector: np.ndarray) -> str:
@@ -152,13 +152,6 @@ class BrainNetwork:
             return
         print("\t[Brain] Updating Predicates (GNG)")
 
-        pre_states = [item[0] for item in buffer]
-        post_states = [item[2] for item in buffer]
-        all_states = np.vstack([*pre_states, *post_states])
-        if self.state_dim is None:
-            self.state_dim = all_states.shape[1]
-        self.symbol_gen.update_bounds(all_states)
-
         updated_skills = set()
         for pre_vector_state, skill_name, post_vector_state in buffer:
             skill_name = skill_name.lower().strip()
@@ -176,12 +169,18 @@ class BrainNetwork:
     def abstract_symbols(self, updated_skills: set[str] | None = None) -> None:
         if updated_skills is None:
             updated_skills = set(self.skills.keys())
-        
-        for skill_name in updated_skills:
-            if skill_name in self.skills:
-                skill_name = skill_name.lower().strip()
-                self.symbol_gen.generate_symbols(skill_name, self.skills[skill_name])
-                self.symbol_gen.agregate_symbols(skill_name)
+
+        normalized_skills = [
+            sk.lower().strip() for sk in updated_skills if sk.lower().strip() in self.skills
+        ]
+
+        # Step 1: Generate Q_init and Q_eff for each updated skill (Eq. 4 & 5)
+        for skill_name in normalized_skills:
+            self.symbol_gen.generate_symbols(skill_name, self.skills[skill_name])
+
+        # Step 2: Partition all symbols into mutually disjoint Voronoi sets (Eq. 6)
+        if normalized_skills:
+            self.symbol_gen.partition_symbols()
 
     def get_active_symbols(self, vector: np.ndarray) -> list[str]:
         symbols_map = self.symbol_gen.get_all_symbols()
@@ -204,7 +203,6 @@ class BrainNetwork:
         return domain_file
 
     def generate_domain_pddl(self, domain_name: str = "robot_domain") -> str:
-        self.symbol_gen.merge_symbols()
 
         symbols_map = self.symbol_gen.get_all_symbols()
         skill_map = self.symbol_gen.get_skill_map()
@@ -393,21 +391,6 @@ class BrainNetwork:
                 self.symbol_gen.skill_map[sk]["precondition"] = set(roles.get("precondition", []))
                 self.symbol_gen.skill_map[sk]["effect"] = set(roles.get("effect", []))
 
-            if "bounds" in data:
-                b_min = data["bounds"].get("dim_min")
-                b_max = data["bounds"].get("dim_max")
-                if b_min is not None and b_max is not None:
-                    self.symbol_gen.dim_min = np.asarray(b_min, dtype=np.float64)
-                    self.symbol_gen.dim_max = np.asarray(b_max, dtype=np.float64)
-                if data["bounds"].get("state_dim"):
-                    self.state_dim = data["bounds"]["state_dim"]
-
-        if self.symbol_gen.dim_min is None:
-            for skill in self.skills.values():
-                if len(skill["precondition"].nodes) > 0:
-                    self.symbol_gen.update_bounds(skill["precondition"].nodes)
-                if len(skill["effect"].nodes) > 0:
-                    self.symbol_gen.update_bounds(skill["effect"].nodes)
 
         if loaded_symbols and not regenerate_symbols:
             self.symbol_gen.symbols = loaded_symbols

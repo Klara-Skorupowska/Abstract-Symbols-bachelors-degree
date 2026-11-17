@@ -13,6 +13,8 @@
     <Name>LicencjatKogni</Name>
     <RootNamespace>WaldekTheRobot</RootNamespace>
     <InterpreterId>MSBuild|venv64|$(MSBuildProjectFullPath)</InterpreterId>
+    <SuppressConfigureTestFrameworkPrompt>true</SuppressConfigureTestFrameworkPrompt>
+    <SuppressPackageInstallationPrompt>True</SuppressPackageInstallationPrompt>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>

@@ -84,6 +84,8 @@ class GNG:
         is_single = (arr.ndim == 1)
         if is_single:
             arr = arr.reshape(1, -1)
+        if len(arr) == 0:
+            return np.zeros(0, dtype=bool)
 
         dim = arr.shape[1]
         if dim == 0 or self.nodes.shape[1] != dim:
@@ -123,7 +125,7 @@ class GNG:
         self.errors[r] = self.errors[q]
         self.cached_radii = None
 
-    def tidy(self):
+    def prune(self):
         max_age = self.max_age
         for edge, age in list(self.edges.items()):
             if age > max_age:
@@ -195,7 +197,7 @@ class GNG:
             self.nodes[nbrs] += self.en * (vector - self.nodes[nbrs])
 
         self._add_edge(s1, s2, age=0)
-        self.tidy()
+        self.prune()
 
         if self.update_count % self.lambda_step == 0 and self.num_nodes < self.max_points:
             self._insert_node()
@@ -262,9 +264,8 @@ class GNG:
                 self.adj.setdefault(u, set()).add(v)
                 self.adj.setdefault(v, set()).add(u)
 
-
 class Predicate:
-    """Predykat owijający rozmaitość GNG w pełnej lub zredukowanej podprzestrzeni."""
+    """Predykat owijający rozmaitość GNG w pełnej przestrzeni percepcyjnej."""
     def __init__(self, max_points=20, dim=None, base_radius=0.1, max_radius=1.0,
                  learning_rate_b=0.2, learning_rate_n=0.006,
                  max_edge_age=50, lambda_step=10, alpha=0.5, d=0.995):
@@ -274,103 +275,34 @@ class Predicate:
             max_edge_age=max_edge_age, lambda_step=lambda_step, alpha=alpha, d=d
         )
         self.dim = int(dim) if dim is not None else None
-        self.active_dimensions = np.arange(self.dim, dtype=int) if self.dim is not None else None
 
     @property
     def nodes(self):
         return self.gng.nodes
 
-    def set_active_dimensions(self, dimensions=None):
-        if dimensions is not None:
-            self.active_dimensions = np.array(dimensions, dtype=int)
-            self.dim = len(self.active_dimensions)
-            self.gng.dim = self.dim
-            if self.gng.nodes.shape[1] != self.dim and self.gng.num_nodes == 0:
-                self.gng.nodes = np.empty((0, self.dim), dtype=np.float64)
-        elif self.dim is not None:
-            self.active_dimensions = np.arange(self.dim, dtype=int)
-            self.gng.dim = self.dim
-            if self.gng.nodes.shape[1] != self.dim and self.gng.num_nodes == 0:
-                self.gng.nodes = np.empty((0, self.dim), dtype=np.float64)
-        else:
-            print('\t[PREDICATE] Wrong active dimensions')
-
-    def _project_vector(self, vectors, vector_dims=None):
-        arr = np.asarray(vectors, dtype=np.float64)
-        if self.active_dimensions is None:
-            return arr
-
-        is_single = (arr.ndim == 1)
-        if is_single:
-            arr = arr.reshape(1, -1)
-
-        act_dims = self.active_dimensions
-
-        if vector_dims is not None:
-            vector_dims = np.asarray(vector_dims, dtype=int)
-            if len(vector_dims) == 0 or len(act_dims) == 0:
-                return None
-
-            # 1. Zabezpieczone wyszukiwanie z użyciem sorter
-            sorter = np.argsort(vector_dims)
-            raw_idx = np.searchsorted(vector_dims, act_dims, sorter=sorter)
-            
-            # Zapobiegamy wyjściu poza zakres tablicy sorter
-            clipped_idx = np.clip(raw_idx, 0, len(vector_dims) - 1)
-            matched_indices = sorter[clipped_idx]
-
-            # 2. Sprawdzamy, czy WSZYSTKIE act_dims faktycznie istnieją w vector_dims
-            is_valid = (raw_idx < len(vector_dims)) & (vector_dims[matched_indices] == act_dims)
-            if np.all(is_valid):
-                proj = arr[:, matched_indices]
-                return proj[0] if is_single else proj
-            return None
-
-        # Wektor pełnowymiarowy: wycinamy kolumny
-        if arr.shape[1] > np.max(act_dims, initial=-1):
-            proj = arr[:, act_dims]
-            return proj[0] if is_single else proj
-
-        # Wektor o dokładnie dopasowanej liczbie kolumn do self.active_dimensions
-        if arr.shape[1] == len(act_dims):
-            return vectors
-
-        return None
-
-    def update(self, vector, vector_dims=None):
+    def update(self, vector):
         vec = np.asarray(vector, dtype=np.float64)
         if self.dim is None:
             self.dim = len(vec)
             self.gng.dim = self.dim
             if self.gng.nodes.shape[1] != self.dim and self.gng.num_nodes == 0:
                 self.gng.nodes = np.empty((0, self.dim), dtype=np.float64)
-            if self.active_dimensions is None:
-                self.active_dimensions = np.arange(self.dim, dtype=int)
 
-        projected = self._project_vector(vec, vector_dims=vector_dims)
-        if projected is not None and len(projected) == self.dim:
-            self.gng.update(projected)
+        if len(vec) == self.dim:
+            self.gng.update(vec)
 
-    def is_active(self, vectors, vector_dims=None):
-        """Obsługuje wektory 1D oraz 2D wsadowo."""
-        projected = self._project_vector(vectors, vector_dims=vector_dims)
-        if projected is None:
-            arr = np.asarray(vectors)
-            return False if arr.ndim == 1 else np.zeros(len(arr), dtype=bool)
-        return self.gng.is_active(projected)
+    def is_active(self, vectors):
+        """Obsługuje wektory 1D oraz 2D wsadowo w pełnej przestrzeni."""
+        return self.gng.is_active(vectors)
 
-    def evaluate(self, vector, vector_dims=None) -> str:
-        return "TRUE" if bool(self.is_active(vector, vector_dims=vector_dims)) else "FALSE"
+    def evaluate(self, vector) -> str:
+        return "TRUE" if bool(self.is_active(vector)) else "FALSE"
 
-    def clone_subspace(self, target_dims=None, node_indices=None) -> "Predicate":
-        if target_dims is None:
-            target_dims = self.active_dimensions.copy() if self.active_dimensions is not None else np.array([], dtype=int)
-        else:
-            target_dims = np.array(target_dims, dtype=int)
-
+    def clone_nodes(self, node_indices=None) -> "Predicate":
+        """Tworzy nowy predykat zawierający wybrany podzbiór węzłów (komórek Woronoja) GNG."""
         new_pred = Predicate(
             max_points=self.gng.max_points,
-            dim=len(target_dims),
+            dim=self.dim,
             base_radius=self.gng.base_radius,
             max_radius=self.gng.max_radius,
             learning_rate_b=self.gng.eb,
@@ -380,35 +312,15 @@ class Predicate:
             alpha=self.gng.alpha,
             d=self.gng.d
         )
-        new_pred.set_active_dimensions(target_dims)
 
-        if self.gng.num_nodes == 0 or len(target_dims) == 0 or self.active_dimensions is None:
-            return new_pred
-
-        curr_dims = self.active_dimensions
-        if len(curr_dims) == 0:
-            return new_pred
-
-        # 1. Bezpieczne wyszukiwanie z użyciem sorter
-        sorter = np.argsort(curr_dims)
-        raw_idx = np.searchsorted(curr_dims, target_dims, sorter=sorter)
-        
-        # Zapobiegamy wyjściu poza rozmiar tablicy (indeks len(curr_dims))
-        clipped_idx = np.clip(raw_idx, 0, len(curr_dims) - 1)
-        matched = sorter[clipped_idx]
-
-        # 2. Sprawdzamy, czy WSZYSTKIE target_dims faktycznie istnieją w curr_dims
-        # (jeśli raw_idx == len(curr_dims) lub wartość się nie zgadza, warunek nie zajdzie)
-        is_valid = (raw_idx < len(curr_dims)) & (curr_dims[matched] == target_dims)
-        if not np.all(is_valid):
-            # Brakuje części wymiarów (tak jak w candidate_joined w reduce_symbols) -> zwracamy pusty predykat
+        if self.gng.num_nodes == 0:
             return new_pred
 
         selected = np.arange(self.gng.num_nodes) if node_indices is None else np.asarray(node_indices, dtype=int)
         if len(selected) == 0:
             return new_pred
 
-        new_pred.gng.nodes = self.gng.nodes[selected][:, matched].copy()
+        new_pred.gng.nodes = self.gng.nodes[selected].copy()
         new_pred.gng.errors = self.gng.errors[selected].copy()
 
         old_to_new = {old_i: new_i for new_i, old_i in enumerate(selected)}
@@ -425,6 +337,70 @@ class Predicate:
 
         return new_pred
 
+    def merge_with(self, other: "Predicate", max_nodes: int | None = None) -> "Predicate":
+        """
+        Merges this predicate with `other` by combining non-redundant Voronoi nodes,
+        preserving internal edges, stitching boundary neighbors, capping total nodes
+        at `max_nodes` (defaults to `self.gng.max_points`), and recalculating radii.
+        """
+        if self.gng.num_nodes == 0:
+            return other.clone_nodes() if other is not None else self.clone_nodes()
+        if other is None or other.gng.num_nodes == 0:
+            return self.clone_nodes()
+
+        cap = int(max_nodes) if max_nodes is not None else int(self.gng.max_points)
+        merged = self.clone_nodes()
+
+        # Filter out nodes from `other` already covered by `self`'s active Voronoi radii
+        unrepresented_mask = ~np.atleast_1d(self.is_active(other.nodes))
+        b_indices = np.nonzero(unrepresented_mask)[0]
+
+        if len(b_indices) > 0:
+            offset = merged.gng.num_nodes
+            new_nodes = other.nodes[b_indices]
+            new_errors = other.gng.errors[b_indices]
+
+            merged.gng.nodes = np.vstack([merged.gng.nodes, new_nodes])
+            merged.gng.errors = np.concatenate([merged.gng.errors, new_errors])
+
+            old_to_new = {old_i: offset + new_i for new_i, old_i in enumerate(b_indices)}
+            for (u, v), age in other.gng.edges.items():
+                if u in old_to_new and v in old_to_new:
+                    merged.gng._add_edge(old_to_new[u], old_to_new[v], age=age)
+
+            # Stitch boundary nodes across the two subgraphs so local radii reflect neighbor spacing
+            if offset > 0:
+                cross_dists = cdist(merged.gng.nodes[:offset], merged.gng.nodes[offset:])
+                for j in range(len(new_nodes)):
+                    nearest_a = int(np.argmin(cross_dists[:, j]))
+                    if cross_dists[nearest_a, j] <= merged.gng.max_radius * 2.0:
+                        merged.gng._add_edge(nearest_a, offset + j, age=0)
+
+        # Enforce max_nodes cap by greedily merging the closest node pairs
+        while merged.gng.num_nodes > cap and merged.gng.num_nodes >= 2:
+            dists = cdist(merged.gng.nodes, merged.gng.nodes)
+            np.fill_diagonal(dists, np.inf)
+            i, j = np.unravel_index(int(np.argmin(dists)), dists.shape)
+            if i > j:
+                i, j = j, i
+
+            # Collapse node j into node i (midpoint) and redirect j's edges to i
+            merged.gng.nodes[i] = 0.5 * (merged.gng.nodes[i] + merged.gng.nodes[j])
+            merged.gng.errors[i] = max(merged.gng.errors[i], merged.gng.errors[j])
+
+            for nbr in list(merged.gng.adj.get(j, ())):
+                if nbr != i:
+                    age = merged.gng.edges.get((min(j, nbr), max(j, nbr)), 0)
+                    merged.gng._add_edge(i, nbr, age=age)
+                merged.gng._remove_edge(j, nbr)
+
+            keep_indices = np.array([idx for idx in range(merged.gng.num_nodes) if idx != j], dtype=int)
+            merged = merged.clone_nodes(node_indices=keep_indices)
+
+        merged.gng.cached_radii = None
+        merged.gng._recompute_radii()
+        return merged
+
     def save_predicate(self, log_dir, pred_name: str):
         if not log_dir:
             return
@@ -432,7 +408,6 @@ class Predicate:
         data = {
             "gng": self.gng.serialize(),
             "dim": self.dim,
-            "active_dimensions": self.active_dimensions.tolist() if self.active_dimensions is not None else None,
         }
         unique_id = uuid.uuid4().hex
         temp_file = os.path.join(log_dir, f"{pred_name}_{unique_id}.tmp")
@@ -461,14 +436,8 @@ class Predicate:
         gng_data = data.get("gng", {})
         params = gng_data.get("parameters", {})
         dim = data.get("dim", params.get("dim", None))
-        dimensions = data.get("active_dimensions", None)
 
         self.dim = int(dim) if dim is not None else None
         self.gng = GNG(**params)
         self.gng.deserialize(gng_data)
-
-        if dimensions is not None:
-            self.set_active_dimensions(dimensions)
-        elif self.dim is not None:
-            self.set_active_dimensions(list(range(self.dim)))
         return self

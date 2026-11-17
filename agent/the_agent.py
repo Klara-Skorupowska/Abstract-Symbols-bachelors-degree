@@ -292,7 +292,11 @@ class TheAgent(Agent):
     def explore(self):
         print("[Agent] Explore")
         skill_name = random.choice(list(self.skillset.keys()))
-        self.execute_skill(skill_name)
+        state_before, _ = self.read_state()
+        if self.execute_skill(skill_name):
+            state_after, _ = self.read_state()
+            self.add_to_buffer((state_before, skill_name, state_after))
+
         if self.reset_requested:
             self._reset_and_restart()
 

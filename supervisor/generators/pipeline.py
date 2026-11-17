@@ -27,5 +27,6 @@ class PipelinePictureGenerator(PictureGenerator):
             gen.run()
 
 if __name__ == "__main__":
-    gen = PipelinePictureGenerator()
+    session = None # r"C:\Users\klara\source\repos\LicencjatKogni\logs\2026-11-17_18-27\epoch_006"
+    gen = PipelinePictureGenerator(session_dir=session)
     gen.run()

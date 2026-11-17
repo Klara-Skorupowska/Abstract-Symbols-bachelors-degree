@@ -67,6 +67,11 @@ class CameraSensor(VirtualSensor):
         super().__init__(bus)
         self.frame = None 
         self.coded = None 
+
+        # --- Dynamic Threshold Parameters (Weber's Law) ---
+        self.base_threshold = 0.1   # Minimum contrast needed in absolute darkness to fire
+        self.alpha = 0.15           # Sensitivity scaler: higher means it ignores more noise in bright light
+        self.threshold = self.base_threshold  # Initial threshold for the first frame
         
         self.bus.register_service(f"/camera/ask/coded", self.send_coded)
 
@@ -102,13 +107,10 @@ class CameraSensor(VirtualSensor):
         rows = 120 // patch_size  
         cols = 160 // patch_size  
 
-        # Core size for receptive field: halve
+        # Core size for receptive field
         core_s = patch_size // 3
         core_offset = (patch_size - core_s) // 2
         surround_pixels = (patch_size * patch_size) - (core_s * core_s)
-        # --- Dynamic Threshold Parameters (Weber's Law) ---
-        base_threshold = 0.1   # Minimum contrast needed in absolute darkness to fire
-        alpha = 0.15           # Sensitivity scaler: higher means it ignores more noise in bright light
 
         output = []
         for r in range(rows):
@@ -124,8 +126,7 @@ class CameraSensor(VirtualSensor):
                 mean_g = np.mean(bgr_roi[:, :, 1]) / 255.0
                 mean_r = np.mean(bgr_roi[:, :, 2]) / 255.0
 
-                # Center patch (10x10) and surround calculation
-
+                # Center patch and surround calculation
                 center_patch = gray_roi[core_offset:core_offset + core_s, core_offset:core_offset + core_s]
                 mean_center = np.mean(center_patch) / 255.0
 
@@ -133,18 +134,19 @@ class CameraSensor(VirtualSensor):
                 center_sum = np.sum(center_patch)
                 mean_surround = (total_sum - center_sum) / (surround_pixels * 255.0)
 
-                # when the cell fires Local Contrast (Weber's Law)
-                threshold = max(base_threshold, alpha * (mean_center + mean_surround))
-
-                # ON-center: Center (+) - Surround (-)
+                # ON-center: Center (+) - Surround (-), using threshold from previous frame
                 on_val = float(np.clip(mean_center - mean_surround, 0.0, 1.0))
-                on_center = 1.0 if on_val > threshold else 0.0
+                on_center = 1.0 if on_val > self.threshold else 0.0
 
-                # OFF-center: Surround (+) - Center (-)
+                # OFF-center: Surround (+) - Center (-), using threshold from previous frame
                 off_val = float(np.clip(mean_surround - mean_center, 0.0, 1.0))
-                off_center = 1.0 if off_val > threshold else 0.0
+                off_center = 1.0 if off_val > self.threshold else 0.0
 
                 output.extend([on_center, off_center, mean_r, mean_g, mean_b])
+
+        # Update self.threshold from the whole picture's mean luminance for the NEXT frame
+        whole_frame_luminance = np.mean(gray) / 255.0
+        self.threshold = max(self.base_threshold, self.alpha * whole_frame_luminance)
 
         self.coded = np.array(output, dtype=float)
         return self.coded
