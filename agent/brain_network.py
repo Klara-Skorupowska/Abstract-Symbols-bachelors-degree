@@ -13,24 +13,49 @@ from supervisor.loggers import SymbolStatsLogger
 class BrainNetwork:
     """Neural-symbolic representation engine using Growing Neural Gas (GNG) and PDDL predicate abstraction."""
 
-    def __init__(self, log_dir: str | Path | None = None):
+    ### HYPERPARAMETERS ### 
+    DEFAULT_HYPERPARAMETERS: dict[str, object] = {
+        "precision": 0.80,         # Acceptance threshold for overlap/equivalence
+        "n_test_points": 500,     # Number of random points in symbol space for testing
+        "min_nodes": 2,            # Minimum nodes in symbol; None defaults to predicate count
+        "max_nodes": 15,
+        "base_radius": 0.25,
+        "max_radius": 4.0,        
+        "learning_rate_b": 0.25,
+        "learning_rate_n": 0.01,
+        "max_edge_age": 25,
+        "lambda_step": 10,
+        "alpha": 0.5,
+        "d": 0.995,
+        "radii_factor": 0.85,
+    }
+
+    def __init__(self, log_dir: str | Path | None = None, brain_params: dict | None = None):
         self.state_dim: int | None = None
         self.skills: dict[str, dict[str, Predicate]] = {}
 
-        ### HYPERPARAMETERS ###
-        self.precision: float = 0.95         # Acceptance threshold for overlap/equivalence
-        self.n_test_points: int = 100        # Number of random points in symbol space for testing
-        self.min_nodes: int | None = 2       # Minimum nodes in symbol; None defaults to predicate count
+        params = dict(self.DEFAULT_HYPERPARAMETERS)
+        if brain_params:
+            unknown = set(brain_params.keys()) - set(self.DEFAULT_HYPERPARAMETERS.keys())
+            if unknown:
+                raise ValueError(f"Unknown BrainNetwork hyperparameters: {sorted(unknown)}")
+            params.update(brain_params)
 
-        self.max_nodes: int = 40
-        self.base_radius: float = 0.1
-        self.max_radius: float = 1.0
-        self.learning_rate_b: float = 0.2
-        self.learning_rate_n: float = 0.01
-        self.max_edge_age: int = 15
-        self.lambda_step: int = 5
-        self.alpha: float = 0.7
-        self.d: float = 0.99
+        ### HYPERPARAMETERS ###
+        self.precision: float = params["precision"]
+        self.n_test_points: int = params["n_test_points"]
+        self.min_nodes: int | None = params["min_nodes"]
+
+        self.max_nodes: int = params["max_nodes"]
+        self.base_radius: float = params["base_radius"]
+        self.max_radius: float = params["max_radius"]
+        self.learning_rate_b: float = params["learning_rate_b"]
+        self.learning_rate_n: float = params["learning_rate_n"]
+        self.max_edge_age: int = params["max_edge_age"]
+        self.lambda_step: int = params["lambda_step"]
+        self.alpha: float = params["alpha"]
+        self.d: float = params["d"]
+        self.radii_factor: float = params["radii_factor"]
         ### ---------------- ###
 
         self.symbol_gen = SymbolGenerator(
@@ -47,6 +72,10 @@ class BrainNetwork:
 
         if log_dir is not None:
             self.set_output_dir(log_dir)
+
+    def get_hyperparameters(self) -> dict[str, object]:
+        """Returns the current brain hyperparameter values."""
+        return {key: getattr(self, key) for key in self.DEFAULT_HYPERPARAMETERS}
 
     def set_output_dir(self, target_dir: str | Path | None):
         """Re-targets all brain outputs to an active epoch directory."""
@@ -79,12 +108,12 @@ class BrainNetwork:
             precondition = Predicate(
                 self.max_nodes, self.state_dim, self.base_radius, self.max_radius,
                 self.learning_rate_b, self.learning_rate_n, self.max_edge_age,
-                self.lambda_step, self.alpha, self.d
+                self.lambda_step, self.alpha, self.d, self.radii_factor
             )
             effect = Predicate(
                 self.max_nodes, self.state_dim, self.base_radius, self.max_radius,
                 self.learning_rate_b, self.learning_rate_n, self.max_edge_age,
-                self.lambda_step, self.alpha, self.d
+                self.lambda_step, self.alpha, self.d, self.radii_factor
             )
             self.add_node(skill_name, precondition, effect)
 
@@ -309,11 +338,6 @@ class BrainNetwork:
             "skills": {
                 sk: {role: list(syms) for role, syms in roles.items()}
                 for sk, roles in self.symbol_gen.skill_map.items()
-            },
-            "bounds": {
-                "dim_min": self.symbol_gen.dim_min.tolist() if self.symbol_gen.dim_min is not None else None,
-                "dim_max": self.symbol_gen.dim_max.tolist() if self.symbol_gen.dim_max is not None else None,
-                "state_dim": self.state_dim,
             }
         }
         with open(map_path, "w", encoding="utf-8") as f:
@@ -353,33 +377,47 @@ class BrainNetwork:
             print(f"\t[Brain] Warning: GNG directory not found at {src_gas_dir}")
             return
 
-        skill_names = set()
-        for filename in os.listdir(src_gas_dir):
-            match = re.match(r"^(.*)_init\.json$", filename)
-            if match:
-                skill_names.add(match.group(1))
+        # Fallback defaults in case older JSON files omit some GNG parameters
+        default_pred_kwargs = {
+            "max_points": getattr(self, "max_nodes", 20),
+            "dim": getattr(self, "state_dim", None),
+        }
+
+        skill_names = sorted({
+            match.group(1)
+            for filename in os.listdir(src_gas_dir)
+            if (match := re.match(r"^(.*)_init\.json$", filename))
+        })
 
         for name in skill_names:
             pre_file = src_gas_dir / f"{name}_init.json"
             eff_file = src_gas_dir / f"{name}_eff.json"
 
             if pre_file.exists() and eff_file.exists():
-                precondition = Predicate(self.max_nodes).load_predicate(str(pre_file))
-                effect = Predicate(self.max_nodes).load_predicate(str(eff_file))
+                precondition = Predicate.from_file(pre_file, **default_pred_kwargs)
+                effect = Predicate.from_file(eff_file, **default_pred_kwargs)
                 self.add_node(name, precondition, effect)
 
-                if self.state_dim is None and len(precondition.nodes) > 0:
-                    self.state_dim = precondition.nodes.shape[1]
+                if self.state_dim is None:
+                    inferred_dim = (
+                        precondition.dim
+                        or effect.dim
+                        or (precondition.nodes.shape[1] if len(precondition.nodes) > 0 else None)
+                        or (effect.nodes.shape[1] if len(effect.nodes) > 0 else None)
+                    )
+                    if inferred_dim is not None:
+                        self.state_dim = int(inferred_dim)
+                        default_pred_kwargs["dim"] = self.state_dim
             else:
                 print(f"\t[Brain] Incomplete predicates for skill '{name}', skipping.")
 
         loaded_symbols = {}
-        for filename in os.listdir(src_gas_dir):
+        for filename in sorted(os.listdir(src_gas_dir)):
             match = re.match(r"^(sym_\d+)\.json$", filename)
             if match:
                 sym_name = match.group(1)
                 sym_file = src_gas_dir / filename
-                loaded_symbols[sym_name] = Predicate(self.max_nodes).load_predicate(str(sym_file))
+                loaded_symbols[sym_name] = Predicate.from_file(sym_file, **default_pred_kwargs)
 
         map_path = src_gas_dir / "skill_map.json"
         if map_path.exists():
@@ -390,7 +428,6 @@ class BrainNetwork:
             for sk, roles in loaded_map.items():
                 self.symbol_gen.skill_map[sk]["precondition"] = set(roles.get("precondition", []))
                 self.symbol_gen.skill_map[sk]["effect"] = set(roles.get("effect", []))
-
 
         if loaded_symbols and not regenerate_symbols:
             self.symbol_gen.symbols = loaded_symbols

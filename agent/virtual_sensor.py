@@ -70,7 +70,8 @@ class CameraSensor(VirtualSensor):
 
         # --- Dynamic Threshold Parameters (Weber's Law) ---
         self.base_threshold = 0.1   # Minimum contrast needed in absolute darkness to fire
-        self.alpha = 0.15           # Sensitivity scaler: higher means it ignores more noise in bright light
+        self.alpha = 0.01           # Sensitivity scaler: higher means it ignores more noise in bright light
+        self.step = 0.01             # step, after (1/self.step) identical frames the threshold approaches the nominal value
         self.threshold = self.base_threshold  # Initial threshold for the first frame
         
         self.bus.register_service(f"/camera/ask/coded", self.send_coded)
@@ -101,6 +102,11 @@ class CameraSensor(VirtualSensor):
             frame = self.frame
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Update self.threshold from the whole picture's mean luminance for the NEXT frame
+        whole_frame_luminance = np.mean(gray) / 255.0
+        new_threshold = (1-self.step) * self.threshold + self.step * self.alpha * whole_frame_luminance
+        self.threshold = max(self.base_threshold, new_threshold)
         
         # Grid dimensions:
         patch_size = 20
@@ -144,9 +150,6 @@ class CameraSensor(VirtualSensor):
 
                 output.extend([on_center, off_center, mean_r, mean_g, mean_b])
 
-        # Update self.threshold from the whole picture's mean luminance for the NEXT frame
-        whole_frame_luminance = np.mean(gray) / 255.0
-        self.threshold = max(self.base_threshold, self.alpha * whole_frame_luminance)
 
         self.coded = np.array(output, dtype=float)
         return self.coded

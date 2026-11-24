@@ -51,7 +51,7 @@ def _load_symbol_data(json_path: str):
     # Read active dimensions
     active_dims = data.get("active_dimensions")
     if active_dims is None:
-        active_dims = data.get("active_dimensions", list(range(nodes_arr.shape[1])))
+        active_dims = list(range(nodes_arr.shape[1]))
 
     active_set = set(active_dims)
     n_nodes = nodes_arr.shape[0]
@@ -63,6 +63,27 @@ def _load_symbol_data(json_path: str):
             full_nodes[:, feat_idx] = nodes_arr[:, col_idx]
 
     return full_nodes, active_set, nodes_arr
+
+
+def _find_invariant_set(full_nodes, precision=0.95, allowed_variance=0.1):
+    """
+    Returns an active set of dimension indices by deactivating variant values.
+    Logic: calculates mean per dimension; good dims fit >= `precision` fraction
+    of elements within `mean +/- allowed_variance` (normalized to [0, 1] range).
+    """
+    if full_nodes is None or len(full_nodes) == 0:
+        return set()
+
+    # Support both 0-1 fractions (e.g. 0.05) and 0-100 percentages (e.g. 5.0)
+    tol = allowed_variance / 100.0 if allowed_variance > 1.0 else float(allowed_variance)
+    req_precision = precision / 100.0 if precision > 1.0 else float(precision)
+
+    means = np.mean(full_nodes, axis=0)
+    within_bounds = np.abs(full_nodes - means) <= tol
+    inlier_ratios = np.mean(within_bounds, axis=0)
+
+    invariant_indices = np.where(inlier_ratios >= req_precision)[0]
+    return set(int(idx) for idx in invariant_indices)
 
 
 def _build_masks(active_set):
@@ -120,7 +141,7 @@ class SymbolIconPictureGenerator(PictureGenerator):
                 display_title = f"Symbol {symbol_num}"
                 img = self.renderer.create_base_canvas(
                     display_title,
-                    f"Symbol Icon"
+                    "Symbol Icon"
                 )
 
                 self.renderer.draw_lidar(
@@ -134,8 +155,7 @@ class SymbolIconPictureGenerator(PictureGenerator):
                     origin=(520, 120)
                 )
                 self.renderer.draw_sample_badge(img, count=len(full_nodes), position=(35, 595))
-                self.renderer.draw_sample_badge(img, count=len(active_set), label="Active dimensions", position=(135, 595))
-
+                
                 out_path = os.path.join(out_dir, f"{file_base}_icon.png")
                 cv2.imwrite(out_path, img)
                 print(f"[SymbolIconPictureGenerator] Saved icon to {out_path}")
@@ -149,7 +169,13 @@ class SymbolCategoryPictureGenerator(PictureGenerator):
     Visualises category bounds across all prototypes:
     - Min-median-max range for LIDARs.
     - Median activation & color for retinal ganglion & cone cells.
+    - Deactivates (does not draw) variant dimensions.
     """
+    def __init__(self, *args, precision: float = 0.95, allowed_variance: float = 0.1, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.precision = precision
+        self.allowed_variance = allowed_variance
+
     def run(self):
         if not self.session_path:
             return
@@ -159,6 +185,7 @@ class SymbolCategoryPictureGenerator(PictureGenerator):
             return
 
         out_dir = self.get_pictures_dir()
+        os.makedirs(out_dir, exist_ok=True)
         file_pattern = os.path.join(gng_dir, "sym_*.json")
 
         for json_path in glob.glob(file_pattern):
@@ -170,18 +197,26 @@ class SymbolCategoryPictureGenerator(PictureGenerator):
                 file_base = os.path.splitext(os.path.basename(json_path))[0]
                 symbol_num = file_base.split("_")[-1]
 
+                # Filter out variant dimensions so they are not drawn at all
+                invariant_set = _find_invariant_set(
+                    full_nodes,
+                    precision=self.precision,
+                    allowed_variance=self.allowed_variance
+                )
+                category_active_set = active_set & invariant_set
+
                 # Prototype statistics
                 median_vals = lower_median(full_nodes, axis=0)
                 mad = np.median(np.abs(full_nodes - median_vals), axis=0)
                 lower_limit_vals = median_vals - mad
                 upper_limit_vals = median_vals + mad
 
-                lidar_active, active_ganglion, active_cones = _build_masks(active_set)
+                lidar_active, active_ganglion, active_cones = _build_masks(category_active_set)
 
                 display_title = f"Symbol {symbol_num}"
                 img = self.renderer.create_base_canvas(
                     display_title,
-                    f"Symbol Category"
+                    "Symbol Category"
                 )
 
                 # 1. LIDAR (Min, Max, Median)
@@ -214,8 +249,16 @@ class SymbolCategoryPictureGenerator(PictureGenerator):
                     origin=(520, 120)
                 )
 
+                prec_pct = int(round(self.precision * 100 if self.precision <= 1.0 else self.precision))
+                var_pct = int(round(self.allowed_variance * 100 if self.allowed_variance <= 1.0 else self.allowed_variance))
+
                 self.renderer.draw_sample_badge(img, count=len(full_nodes), position=(35, 595))
-                self.renderer.draw_sample_badge(img, count=len(active_set), label="Active dimensions", position=(135, 595))
+                self.renderer.draw_sample_badge(
+                    img,
+                    count=len(category_active_set),
+                    label=f"Invariant dims (prec: {prec_pct}%, var: +/-{var_pct}%)",
+                    position=(135, 595)
+                )
 
                 out_path = os.path.join(out_dir, f"{file_base}_category.png")
                 cv2.imwrite(out_path, img)

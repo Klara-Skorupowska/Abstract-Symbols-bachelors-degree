@@ -6,16 +6,22 @@ SKILL_ORDER = ['Start', 'Find_The_Door', 'Go_To_The_Door', 'Open_The_Door', 'Fin
 SKILL_ORDER = [skill.lower() for skill in SKILL_ORDER]
 
 def get_session(logs_root, session_dir=None):
+    if session_dir is not None:
+        if os.path.exists(session_dir):
+            return session_dir
+        joined = os.path.join(logs_root, session_dir)
+        if os.path.exists(joined):
+            return joined
+
     if not os.path.exists(logs_root):
         return None
-    if session_dir is not None and os.path.exists(os.path.join(logs_root, session_dir)):
-        return os.path.join(logs_root, session_dir)
 
     def parse_session_timestamp(dir_name):
         try:
             return datetime.strptime(dir_name, '%Y-%m-%d_%H-%M')
         except ValueError:
             return None
+
     valid_sessions = []
     for entry in os.scandir(logs_root):
         if entry.is_dir() and parse_session_timestamp(entry.name):

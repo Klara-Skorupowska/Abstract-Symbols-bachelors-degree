@@ -24,31 +24,23 @@ class SymbolGenerator:
         self._rng = np.random.default_rng(seed)
 
     def _get_bounding_box(self, pred: Predicate) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        """Returns (box_min, box_max) circumscribing the predicate's GNG nodes."""
+        """Zwraca (box_min, box_max) uwzględniając promienie hipersfer wokół węzłów."""
         if pred is None or len(pred.nodes) == 0:
             return None
         nodes = np.asarray(pred.nodes, dtype=np.float64)
         if nodes.ndim == 1:
             nodes = nodes.reshape(1, -1)
-        return np.min(nodes, axis=0), np.max(nodes, axis=0)
+        radii = np.asarray(pred.radii, dtype=np.float64).reshape(-1, 1)
+        return np.min(nodes - radii, axis=0), np.max(nodes + radii, axis=0)
 
     def _get_symbol_cardinality(self, pred: Predicate) -> Tuple[int, float]:
         """
-        Returns a comparable size key (node_count, bbox_volume).
-        Using node count as primary cardinality avoids degenerate 0-volume ties
-        on 1-node predicates and axis-aligned lower-dimensional manifolds.
+        Zwraca (liczba_węzłów, suma_promieni) jako bezpieczną w 248D miarę rozmiaru symbolu
+        (unika underflow do 0.0 przy mnożeniu 248 wymiarów).
         """
-        bbox = self._get_bounding_box(pred)
-        if bbox is None:
+        if pred is None or len(pred.nodes) == 0:
             return (0, 0.0)
-        n_nodes = len(pred.nodes)
-        if n_nodes < 2:
-            return (n_nodes, 0.0)
-
-        box_min, box_max = bbox
-        spans = box_max - box_min
-        effective_spans = np.where(spans <= 1e-9, 1e-6, spans)
-        return (n_nodes, float(np.prod(effective_spans)))
+        return (len(pred.nodes), float(np.sum(pred.radii)))
 
     def _same_cardinality(self, card_a: Tuple[int, float], card_b: Tuple[int, float]) -> bool:
         return card_a[0] == card_b[0] and bool(
@@ -73,18 +65,29 @@ class SymbolGenerator:
         min_b, max_b = bbox_b
         return bool(np.all((max_a + tol) >= min_b) and np.all((max_b + tol) >= min_a))
 
-    def _sample_box_points(
-        self,
-        box_min: np.ndarray,
-        box_max: np.ndarray,
-        n_points: Optional[int] = None,
-    ) -> np.ndarray:
-        """Samples test points uniformly within the specified bounding box."""
-        n = n_points if n_points is not None else self.n_test_points
-        low = np.asarray(box_min, dtype=np.float64)
-        high = np.asarray(box_max, dtype=np.float64)
-        high = np.where(high <= low, low + 1e-9, high)
-        return self._rng.uniform(low=low, high=high, size=(n, len(low)))
+    def _sample_spheres_points(self, pred: Predicate, n_points: int) -> np.ndarray:
+        """
+        Losuje punkty jednostajnie wewnątrz unii hipersfer węzłów predykatu w D-wymiarach.
+        """
+        nodes = np.asarray(pred.nodes, dtype=np.float64)
+        radii = np.asarray(pred.radii, dtype=np.float64)
+        n_nodes, dim = nodes.shape
+
+        # Wybieramy losowe węzły (z wagą proporcjonalną do r, by unikać dominacji małych kul)
+        weights = radii / np.sum(radii)
+        chosen_idx = self._rng.choice(n_nodes, size=n_points, p=weights)
+
+        # Losowy kierunek na sferze jednostkowej w D wymiarach
+        directions = self._rng.normal(size=(n_points, dim))
+        norms = np.linalg.norm(directions, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-12, 1.0, norms)
+        unit_dirs = directions / norms
+
+        # Losowy promień wewnątrz kuli D-wymiarowej: r * U^(1/D)
+        u = self._rng.uniform(0.0, 1.0, size=(n_points, 1))
+        scales = radii[chosen_idx, None] * (u ** (1.0 / dim))
+
+        return nodes[chosen_idx] + unit_dirs * scales
 
     def get_skill_map(self) -> dict:
         return {
@@ -149,61 +152,39 @@ class SymbolGenerator:
         return inter
 
     def _predicates_overlap(self, pred_a: Predicate, pred_b: Predicate) -> bool:
-        """
-        Checks whether pred_a and pred_b overlap using strict bounding-box pruning
-        followed by Voronoi cell activation checks.
-        """
         if pred_a is None or pred_b is None or len(pred_a.nodes) == 0 or len(pred_b.nodes) == 0:
             return False
-
         bbox_a = self._get_bounding_box(pred_a)
         bbox_b = self._get_bounding_box(pred_b)
         if bbox_a is None or bbox_b is None or not self._boxes_intersect(bbox_a, bbox_b, tol=0.0):
             return False
-
-        if np.any(pred_b.is_active(pred_a.nodes)) or np.any(pred_a.is_active(pred_b.nodes)):
-            return True
-
-        inter_min = np.maximum(bbox_a[0], bbox_b[0])
-        inter_max = np.minimum(bbox_a[1], bbox_b[1])
-        if np.any(inter_min > inter_max):
-            return False
-
-        sample_pts = self._sample_box_points(inter_min, inter_max)
-        return bool(np.any(pred_a.is_active(sample_pts) & pred_b.is_active(sample_pts)))
+        # Consistent with _find_difference / _find_intersection node-level resolution
+        return bool(np.any(pred_b.is_active(pred_a.nodes)) or np.any(pred_a.is_active(pred_b.nodes)))
 
     def _manifolds_equivalent(self, pred_a: Predicate, pred_b: Predicate) -> bool:
         """
-        Two GNG predicates are equivalent if their circumscribing bounding boxes
-        intersect and their Voronoi regions agree on at least `precision` of sampled points.
+        Sprawdza równoważność dwóch predykatów miarą Jaccarda |A ∩ B| / |A ∪ B|
+        poprzez próbkowanie bezpośrednio wewnątrz kul A i B (działa stabilnie w 248D).
         """
         if pred_a is None or pred_b is None:
             return False
         if len(pred_a.nodes) == 0 or len(pred_b.nodes) == 0:
             return False
 
-        bbox_a = self._get_bounding_box(pred_a)
-        bbox_b = self._get_bounding_box(pred_b)
-        if bbox_a is None or bbox_b is None or not self._boxes_intersect(bbox_a, bbox_b, tol=0.0):
+        if not self._predicates_overlap(pred_a, pred_b):
             return False
 
-        union_min = np.minimum(bbox_a[0], bbox_b[0])
-        union_max = np.maximum(bbox_a[1], bbox_b[1])
-        sample_pts = self._sample_box_points(union_min, union_max)
+        half_n = max(64, self.n_test_points // 2)
+        pts_a = self._sample_spheres_points(pred_a, half_n)
+        pts_b = self._sample_spheres_points(pred_b, half_n)
+        sample_pts = np.vstack([pts_a, pts_b])
 
         active_a = np.atleast_1d(pred_a.is_active(sample_pts))
         active_b = np.atleast_1d(pred_b.is_active(sample_pts))
 
         union_count = int(np.sum(active_a | active_b))
         if union_count == 0:
-            act_a_nodes = np.atleast_1d(pred_b.is_active(pred_a.nodes))
-            act_b_nodes = np.atleast_1d(pred_a.is_active(pred_b.nodes))
-            if act_a_nodes.size == 0 or act_b_nodes.size == 0:
-                return False
-            return bool(
-                (np.mean(act_a_nodes) >= self.precision)
-                and (np.mean(act_b_nodes) >= self.precision)
-            )
+            return False
 
         overlap_ratio = float(np.sum(active_a & active_b)) / float(union_count)
         return bool(overlap_ratio >= self.precision)

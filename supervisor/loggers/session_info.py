@@ -11,7 +11,7 @@ class SessionInfoLogger(BaseLogger):
             "precision": getattr(brain, "precision", "?"),
             "n_test_points": getattr(brain, "n_test_points", "?"),
             "min_nodes_in_symbol": getattr(brain, "min_nodes", "?"),
-            "span_tolerance": getattr(brain, "span_tolerance", "?"),
+            "max_nodes_in_symbol": getattr(brain, "max_nodes", "?"),
             "base_radius": getattr(brain, "base_radius", "?"),
             "max_radius": getattr(brain, "max_radius", "?"),
             "learning_rate_b": getattr(brain, "learning_rate_b", "?"),
@@ -20,7 +20,8 @@ class SessionInfoLogger(BaseLogger):
             "lambda_step": getattr(brain, "lambda_step", "?"),
             "alpha": getattr(brain, "alpha", "?"),
             "d": getattr(brain, "d", "?"),
-        }
+            "radii_factor": getattr(brain, "radii_factor", "?"),
+            }
 
         content = [
             "========================================",

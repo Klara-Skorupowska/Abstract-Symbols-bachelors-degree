@@ -5,7 +5,12 @@ import time
 from supervisor.generators.pipeline import PipelinePictureGenerator
 from supervisor.monitors.pipeline import PipelineLiveMonitor
 
-def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, stop_event: threading.Event):
+def supervisor_loop(
+    bus: Communicator,
+    setup_complete_event: threading.Event,
+    stop_event: threading.Event,
+    session_dir: str | None = None,
+):
     """Runs continuously at 5Hz, completely independent of the agent and simulation."""
     print("[Supervisor] Starting...")
     print("[Supervisor] Loading statistics...")
@@ -41,6 +46,6 @@ def supervisor_loop(bus: Communicator, setup_complete_event: threading.Event, st
         monitors.close()
         
         # Call the unified picture generator pipeline
-        pics = PipelinePictureGenerator(logs_root="logs")
+        pics = PipelinePictureGenerator(logs_root="logs", session_dir=session_dir)
         pics.run()
         print("[Supervisor] Supervisor closed safely.")

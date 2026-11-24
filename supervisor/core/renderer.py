@@ -1,9 +1,7 @@
 import cv2
-import math
-import textwrap
 import numpy as np
-import networkx as nx
-from supervisor.utils.core_utils import lower_median, SKILL_ORDER
+from scipy.stats import gaussian_kde
+from supervisor.utils.core_utils import lower_median
 
 class Renderer:
     def __init__(self):
@@ -85,11 +83,11 @@ class Renderer:
         color_main = custom_color if custom_color is not None else self.primary_color
         color_sec = self.secondary_color if custom_color is None else tuple(int(0.6 * c + 0.4 * 255) for c in color_main)
         for ang in self.LIDAR_ANGLES:
-            rad = np.deg2rad(ang - 90)
+            rad = np.deg2rad(-ang - 90)
             cv2.line(img, center, (int(center[0] + max_radius * np.cos(rad)), int(center[1] + max_radius * np.sin(rad))), self.tertiary_color, 2, cv2.LINE_AA)
         for i, ang in enumerate(self.LIDAR_ANGLES):
             if active_flags is not None and not active_flags[i]: continue
-            rad = np.deg2rad(ang - 90)
+            rad = np.deg2rad(-ang - 90)
             if mode == 'live':
                 r_val = (max(min(float(lidar_data[i]), 0.1), 0.0) / 0.1) * max_radius
                 x_val, y_val = int(center[0] + r_val * np.cos(rad)), int(center[1] + r_val * np.sin(rad))
@@ -169,71 +167,6 @@ class Renderer:
                     else:
                         cv2.rectangle(img, (cp_x, cp_y), (cp_x + cell_size - 2, cp_y + cell_size - 2), self.PANEL_BORDER, 1)
 
-    def draw_transition_graph(self, img, graph_data):
-        nodes, edges = graph_data.get('nodes', []), graph_data.get('edges', [])
-        if not nodes:
-            cv2.putText(img, 'No graph data', (400, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, self.neutral_gray, 2)
-            return
-        ordered_nodes = [n for n in [s.lower() for s in SKILL_ORDER] if n in nodes]
-        for n in nodes: 
-            if n not in ordered_nodes: ordered_nodes.append(n)
-        node_indices = {node: i for i, node in enumerate(ordered_nodes)}
-        n_nodes, (h, w) = len(ordered_nodes), img.shape[:2]
-        node_radius, y_center, margin_x = 42, h // 2, 80
-        if n_nodes > 1:
-            step_x = (w - 2 * margin_x) / (n_nodes - 1)
-            positions = {node: (int(margin_x + i * step_x), y_center) for i, node in enumerate(ordered_nodes)}
-        else:
-            positions = {ordered_nodes[0]: (w // 2, y_center)}
-        thickness, max_weight, min_weight = 2, 1.0, 0.0
-        for edge_info in edges:
-            source, target, weight = edge_info.get('source'), edge_info.get('target'), edge_info.get('weight', 1)
-            if weight is None or not isinstance(weight, (int, float)) or math.isnan(weight) or math.isinf(weight): weight = 0.0
-            if source not in positions or target not in positions: continue
-            pt1, pt2 = positions[source], positions[target]
-            idx_src, idx_tgt = node_indices[source], node_indices[target]
-            if weight >= 1.0:
-                edge_color = self.status_green
-            else:
-                t = max(0.0, min(1.0, (weight - min_weight) / (max_weight - min_weight))) if max_weight != min_weight else 1.0
-                faint_color = tuple(int(0.85 * bg + 0.15 * pri) for bg, pri in zip(self.BG_COLOR, self.primary_color))
-                edge_color = tuple(int((1.0 - t) * faint_color[c] + t * self.primary_color[c]) for c in range(3))
-            if source == target:
-                P1, P2, C = np.array([pt1[0] - 12.0, pt1[1] - node_radius]), np.array([pt1[0] + 12.0, pt1[1] - node_radius]), np.array([pt1[0], pt1[1] - node_radius - 65.0])
-                t_samples = np.linspace(0, 1, 25).reshape(-1, 1)
-                curve_pts = ((1 - t_samples) ** 2 * P1 + 2 * (1 - t_samples) * t_samples * C + t_samples ** 2 * P2).astype(np.int32)
-                cv2.polylines(img, [curve_pts], False, edge_color, thickness, cv2.LINE_AA)
-                continue
-            is_forward = idx_src < idx_tgt
-            y_direction = -1.0 if is_forward else 1.0
-            P1, P2 = np.array([pt1[0], pt1[1] + y_direction * node_radius]), np.array([pt2[0], pt2[1] + y_direction * node_radius])
-            node_step_diff = abs(idx_tgt - idx_src)
-            curve_height = 45.0 + (node_step_diff - 1) * 26.0
-            M = (P1 + P2) / 2.0
-            C = np.array([M[0], M[1] + y_direction * curve_height])
-            t_samples = np.linspace(0, 1, 35).reshape(-1, 1)
-            curve_pts = ((1 - t_samples) ** 2 * P1 + 2 * (1 - t_samples) * t_samples * C + t_samples ** 2 * P2).astype(np.int32)
-            cv2.polylines(img, [curve_pts], False, edge_color, thickness, cv2.LINE_AA)
-            tangent = P2 - C
-            t_len = math.hypot(tangent[0], tangent[1])
-            if t_len > 0:
-                tx, ty = tangent[0] / t_len, tangent[1] / t_len
-                cv2.arrowedLine(img, (int(P2[0] - tx * 16), int(P2[1] - ty * 16)), (int(P2[0]), int(P2[1])), edge_color, thickness, tipLength=0.45, line_type=cv2.LINE_AA)
-            apex = (P1 + 2 * C + P2) / 4.0
-            label_text = f'{weight:.2f}' if isinstance(weight, float) else str(weight)
-            (lbl_w, lbl_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-            cv2.putText(img, label_text, (int(apex[0] - lbl_w / 2), int(apex[1] + y_direction * 14.0 + (lbl_h / 2 if y_direction > 0 else -lbl_h / 2))), cv2.FONT_HERSHEY_SIMPLEX, 0.38, self.TEXT_MAIN, 1, cv2.LINE_AA)
-        for node, (x, y) in positions.items():
-            cv2.circle(img, (x, y), node_radius, self.tertiary_color, -1)
-            cv2.circle(img, (x, y), node_radius, self.primary_color, 2)
-            wrapped_lines = textwrap.wrap(node.replace('_', ' ').title(), width=9)
-            line_metrics = [(*cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1), line) for line in wrapped_lines]
-            total_height = sum(th + b for (tw, th), b, line in line_metrics) + max(0, len(wrapped_lines) - 1) * 3
-            current_y = y - total_height // 2
-            for (tw, th), baseline, line in line_metrics:
-                cv2.putText(img, line, (int(x - tw / 2), int(current_y + th)), cv2.FONT_HERSHEY_SIMPLEX, 0.36, self.TEXT_MAIN, 1, cv2.LINE_AA)
-                current_y += th + baseline + 3
-
     def draw_frequency_plot(self, img, timestamps, bin_size_sec=60.0):
         if not timestamps or len(timestamps) < 2:
             cv2.putText(img, 'Insufficient timestamp data', (350, 320), cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.neutral_gray, 2, cv2.LINE_AA)
@@ -266,3 +199,319 @@ class Renderer:
             for i in range(len(curve_pts) - 1): cv2.line(img, curve_pts[i], curve_pts[i + 1], self.BORDER_COLOR, 2, cv2.LINE_AA)
             for pt in curve_pts: cv2.circle(img, pt, 3, self.primary_color, -1, cv2.LINE_AA)
         cv2.putText(img, f'Elapsed Time (Bins of {int(bin_size_sec)}s) ->', (plot_x + plot_w // 2 - 100, plot_y + plot_h + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.TEXT_MAIN, 1, cv2.LINE_AA)
+
+    def draw_kde_plot(self, img, epoch_datasets: list[tuple[str, np.ndarray]], bw_method=None):
+        """
+        Renders a sequential, continuous KDE plot across chained epochs where each
+        epoch follows the previous one, showing both local update density and
+        cumulative data accumulation.
+        """
+        valid_series = [(label, np.sort(np.asarray(ts, dtype=float))) for label, ts in epoch_datasets if len(ts) >= 2]
+        if not valid_series:
+            cv2.putText(img, 'Insufficient timestamp data for KDE', (320, 320), cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.neutral_gray, 2, cv2.LINE_AA)
+            return
+
+        plot_x, plot_y, plot_w, plot_h = 90, 140, 820, 380
+
+        # Concatenate epochs sequentially along continuous active time
+        concat_ts = []
+        boundaries = []  # (start_t, end_t, label, count)
+        cursor_t = 0.0
+
+        for label, ts in valid_series:
+            rel = ts - ts[0]
+            dur = max(float(rel[-1]), 1e-3)
+            shifted = rel + cursor_t
+            concat_ts.append(shifted)
+            boundaries.append((cursor_t, cursor_t + dur, label, len(ts)))
+            cursor_t += dur
+
+        all_ts = np.concatenate(concat_ts)
+        total_duration = max(cursor_t, 1.0)
+        total_samples = len(all_ts)
+
+        # Use a fixed temporal bandwidth in seconds (default: 120s instead of Scott's ~16,000s)
+        bw_seconds = float(bw_method) if bw_method is not None else 120.0
+        std_ts = float(np.std(all_ts, ddof=1))
+        if std_ts <= 0:
+            cv2.putText(img, 'Zero variance in timestamps for KDE', (320, 320), cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.neutral_gray, 2, cv2.LINE_AA)
+            return
+
+        # Boundary reflection within 3*bw_seconds so edges don't artificially drop to half-height
+        pad = 3.0 * bw_seconds
+        left_reflect = -all_ts[all_ts < pad]
+        right_reflect = 2.0 * total_duration - all_ts[all_ts > (total_duration - pad)]
+        padded_ts = np.concatenate([left_reflect, all_ts, right_reflect])
+        padded_std = float(np.std(padded_ts, ddof=1))
+
+        try:
+            kde = gaussian_kde(padded_ts, bw_method=bw_seconds / padded_std)
+            x_grid = np.linspace(0.0, total_duration, plot_w)  # 1 evaluation per horizontal pixel
+            rates = kde(x_grid) * len(padded_ts)
+        except Exception:
+            cv2.putText(img, 'Failed to compute KDE curve', (340, 320), cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.neutral_gray, 2, cv2.LINE_AA)
+            return
+
+        max_rate = max(float(np.max(rates)), 1e-6)
+
+        palette = [
+            self.primary_color,
+            self.status_green,
+            (180, 90, 140),
+            (60, 140, 180),
+            self.status_red,
+            self.BORDER_COLOR,
+        ]
+
+        # 1. Alternating epoch background bands & boundary dividers
+        for idx, (t0, t1, label, count) in enumerate(boundaries):
+            x0 = plot_x + int((t0 / total_duration) * plot_w)
+            x1 = plot_x + int((t1 / total_duration) * plot_w)
+            if idx % 2 == 1:
+                cv2.rectangle(img, (x0, plot_y), (x1, plot_y + plot_h), (240, 242, 245), -1)
+            if idx > 0:
+                for y_dash in range(plot_y, plot_y + plot_h, 10):
+                    cv2.line(img, (x0, y_dash), (x0, min(y_dash + 5, plot_y + plot_h)), self.neutral_gray, 1, cv2.LINE_AA)
+
+            # Epoch header label inside top of band
+            band_w = x1 - x0
+            if band_w > 45:
+                short_lbl = f"E{idx + 1} (+{count})" if band_w < 110 else f"E{idx + 1}: {label[:10]} (+{count})"
+                cv2.putText(img, short_lbl, (x0 + 6, plot_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.36, palette[idx % len(palette)], 1, cv2.LINE_AA)
+
+        cv2.rectangle(img, (plot_x, plot_y), (plot_x + plot_w, plot_y + plot_h), self.PANEL_BORDER, 1)
+
+        # 2. Horizontal grid lines & Left Y-axis (Update Rate: updates/sec)
+        grid_steps = 4
+        for i in range(grid_steps + 1):
+            y_val = plot_y + plot_h - int(i * plot_h / grid_steps)
+            cv2.line(img, (plot_x, y_val), (plot_x + plot_w, y_val), self.tertiary_color, 1, cv2.LINE_AA)
+            tick_val = (i * max_rate) / grid_steps
+            cv2.putText(img, f'{tick_val:.2f}', (plot_x - 45, y_val + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, self.neutral_gray, 1, cv2.LINE_AA)
+
+        # X-axis ticks (Cumulative Active Time)
+        for i in range(5):
+            x_val = plot_x + int(i * plot_w / 4)
+            t_tick = (i * total_duration) / 4.0
+            cv2.line(img, (x_val, plot_y + plot_h), (x_val, plot_y + plot_h + 5), self.neutral_gray, 1, cv2.LINE_AA)
+            cv2.putText(img, f'{t_tick:.0f}s', (x_val - 12, plot_y + plot_h + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.38, self.neutral_gray, 1, cv2.LINE_AA)
+
+        # 3. Draw KDE curve colored per sequential epoch with translucent fill
+        overlay = img.copy()
+        for idx, (t0, t1, _, _) in enumerate(boundaries):
+            color = palette[idx % len(palette)]
+            mask = (x_grid >= t0) & (x_grid <= t1)
+            if idx > 0 and np.any(mask):
+                # Include boundary point so segments connect seamlessly
+                first_idx = np.argmax(mask)
+                if first_idx > 0:
+                    mask[first_idx - 1] = True
+
+            seg_x = x_grid[mask]
+            seg_r = rates[mask]
+            if len(seg_x) < 2:
+                continue
+
+            pts = [
+                (
+                    plot_x + int((gx / total_duration) * plot_w),
+                    plot_y + plot_h - int((r / max_rate) * (plot_h - 28))
+                )
+                for gx, r in zip(seg_x, seg_r)
+            ]
+            pts_np = np.array(pts, dtype=np.int32)
+            poly_pts = np.vstack([[(pts[0][0], plot_y + plot_h)], pts_np, [(pts[-1][0], plot_y + plot_h)]])
+            cv2.fillPoly(overlay, [poly_pts], color)
+            cv2.polylines(img, [pts_np], isClosed=False, color=color, thickness=2, lineType=cv2.LINE_AA)
+
+        cv2.addWeighted(overlay, 0.20, img, 0.80, 0, img)
+
+        # 4. Linear trend line across KDE update rate
+        if len(x_grid) >= 2:
+            slope, intercept = np.polyfit(x_grid, rates, 1)
+            y_start = float(np.clip(intercept, 0.0, max_rate))
+            y_end = float(np.clip(slope * total_duration + intercept, 0.0, max_rate))
+
+            pt1 = (plot_x, plot_y + plot_h - int((y_start / max_rate) * (plot_h - 28)))
+            pt2 = (plot_x + plot_w, plot_y + plot_h - int((y_end / max_rate) * (plot_h - 28)))
+
+            cv2.line(img, pt1, pt2, self.BORDER_COLOR, 1, cv2.LINE_AA)
+
+            slope_per_hr = slope * 3600.0
+            trend_label = f"Trend: {slope_per_hr:+.4f} (updates/s)/hr"
+            cv2.putText(img, trend_label, (plot_x + 150, plot_y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.BORDER_COLOR, 1, cv2.LINE_AA)
+
+        # Axis titles & Legend note
+        cv2.putText(img, 'Rate (updates/s)', (plot_x - 55, plot_y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.primary_color, 1, cv2.LINE_AA)
+        cv2.putText(img, 'Cumulative Active Time Across Sequential Epochs (s) ->', (plot_x + plot_w // 2 - 165, plot_y + plot_h + 38), cv2.FONT_HERSHEY_SIMPLEX, 0.46, self.TEXT_MAIN, 1, cv2.LINE_AA)
+
+    def draw_log_mode_bins(
+        self,
+        img,
+        bins_data: list[dict],
+        bin_size: int = 100,
+        epoch_boundaries: list[tuple[int, str, int]] | None = None
+    ):
+        """
+        Draws a binned stacked bar chart showing EXPLORE vs PLAN counts,
+        an overlaid line/marker series and linear trend line for COLLECTED tag counts per bin,
+        and vertical dashed dividers marking transitions between chained epochs.
+
+        bins_data: list of dicts with keys:
+            {'total': int, 'explore': int, 'plan': int, 'collected': int}
+        epoch_boundaries: list of (start_log_index, epoch_label, new_logs_count)
+        """
+        if not bins_data:
+            cv2.putText(img, 'Insufficient log data in updatefreq.txt', (310, 320),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.neutral_gray, 2, cv2.LINE_AA)
+            return
+
+        plot_x, plot_y, plot_w, plot_h = 90, 145, 820, 370
+        n_bins = len(bins_data)
+        max_y = max(max(b['total'] for b in bins_data), bin_size, 1)
+
+        total_logs = sum(b['total'] for b in bins_data)
+        tot_explore = sum(b['explore'] for b in bins_data)
+        tot_plan = sum(b['plan'] for b in bins_data)
+        tot_collected = sum(b['collected'] for b in bins_data)
+
+        # Header stats
+        stats_text = (
+            f"Total: {total_logs} | Explore: {tot_explore} ({tot_explore / total_logs * 100:.1f}%) | "
+            f"Plan: {tot_plan} ({tot_plan / total_logs * 100:.1f}%) | "
+            f"Collected: {tot_collected} ({tot_collected / total_logs * 100:.1f}%)"
+        )
+        cv2.putText(img, stats_text, (plot_x, plot_y - 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, self.TEXT_MAIN, 1, cv2.LINE_AA)
+
+        # Legend (top-right above plot)
+        legend_items = [
+            ("EXPLORE", self.tertiary_color, "box"),
+            ("PLAN", self.secondary_color, "box"),
+            ("COLLECTED", self.primary_color, "line"),
+        ]
+        lx = plot_x + plot_w - 310
+        ly = plot_y - 8
+        for lbl, col, kind in legend_items:
+            if kind == "box":
+                cv2.rectangle(img, (lx, ly - 10), (lx + 12, ly + 2), col, -1)
+                cv2.rectangle(img, (lx, ly - 10), (lx + 12, ly + 2), self.BORDER_COLOR, 1)
+            else:
+                cv2.line(img, (lx, ly - 4), (lx + 14, ly - 4), col, 2, cv2.LINE_AA)
+                cv2.circle(img, (lx + 7, ly - 4), 4, col, -1, cv2.LINE_AA)
+            cv2.putText(img, lbl, (lx + 18, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.TEXT_MAIN, 1, cv2.LINE_AA)
+            lx += 105
+
+        slot_w = plot_w / n_bins
+
+        # 1. Alternating epoch background bands (drawn behind grid and bars)
+        if epoch_boundaries and len(epoch_boundaries) > 1:
+            for idx, (start_idx, _, _) in enumerate(epoch_boundaries):
+                end_idx = epoch_boundaries[idx + 1][0] if idx + 1 < len(epoch_boundaries) else total_logs
+                x0 = plot_x + int((start_idx / bin_size) * slot_w)
+                x1 = min(plot_x + int((end_idx / bin_size) * slot_w), plot_x + plot_w)
+                if idx % 2 == 1 and x1 > x0:
+                    cv2.rectangle(img, (x0, plot_y), (x1, plot_y + plot_h), (238, 240, 244), -1)
+
+        # Plot border & horizontal grid lines
+        cv2.rectangle(img, (plot_x, plot_y), (plot_x + plot_w, plot_y + plot_h), self.PANEL_BORDER, 1)
+        grid_steps = 4
+        for i in range(grid_steps + 1):
+            y_val = plot_y + plot_h - int(i * plot_h / grid_steps)
+            cv2.line(img, (plot_x, y_val), (plot_x + plot_w, y_val), self.tertiary_color, 1, cv2.LINE_AA)
+            tick_val = int(round((i * max_y) / grid_steps))
+            cv2.putText(img, f'{tick_val}', (plot_x - 38, y_val + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.neutral_gray, 1, cv2.LINE_AA)
+
+        # 2. Draw stacked bars (EXPLORE bottom, PLAN top) and collect points for COLLECTED curve
+        bar_w = max(int(slot_w * 0.72), 4)
+        collected_pts = []
+
+        for i, b in enumerate(bins_data):
+            cx = plot_x + int((i + 0.5) * slot_w)
+            bx0 = cx - bar_w // 2
+            bx1 = bx0 + bar_w
+            base_y = plot_y + plot_h
+
+            # EXPLORE bar (tertiary_color)
+            exp_h = int((b['explore'] / max_y) * plot_h)
+            exp_y0 = base_y - exp_h
+            if exp_h > 0:
+                cv2.rectangle(img, (bx0, exp_y0), (bx1, base_y), self.tertiary_color, -1)
+                cv2.rectangle(img, (bx0, exp_y0), (bx1, base_y), self.BORDER_COLOR, 1)
+
+            # PLAN bar stacked on top of EXPLORE (secondary_color)
+            plan_h = int((b['plan'] / max_y) * plot_h)
+            plan_y0 = exp_y0 - plan_h
+            if plan_h > 0:
+                cv2.rectangle(img, (bx0, plan_y0), (bx1, exp_y0), self.secondary_color, -1)
+                cv2.rectangle(img, (bx0, plan_y0), (bx1, exp_y0), self.BORDER_COLOR, 1)
+
+            # COLLECTED point (primary_color)
+            col_h = int((b['collected'] / max_y) * plot_h)
+            col_y = base_y - col_h
+            collected_pts.append((cx, col_y, b['collected']))
+
+            # X-axis tick labels (bin range)
+            if n_bins <= 12 or i % max(1, n_bins // 10) == 0:
+                start_log = i * bin_size + 1
+                end_log = i * bin_size + b['total']
+                tick_lbl = f"{start_log}-{end_log}"
+                (tw, _), _ = cv2.getTextSize(tick_lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+                cv2.putText(img, tick_lbl, (cx - tw // 2, plot_y + plot_h + 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, self.neutral_gray, 1, cv2.LINE_AA)
+
+        # 3. Draw COLLECTED curve, markers, and linear trend line
+        if len(collected_pts) > 1:
+            for i in range(len(collected_pts) - 1):
+                cv2.line(img, collected_pts[i][:2], collected_pts[i + 1][:2],
+                         self.primary_color, 2, cv2.LINE_AA)
+
+            # Linear trend line for COLLECTED across bins (normalized per bin_size logs)
+            x_bins = np.arange(n_bins, dtype=float)
+            y_rates = np.array(
+                [(b['collected'] / max(b['total'], 1)) * bin_size for b in bins_data],
+                dtype=float
+            )
+            slope, intercept = np.polyfit(x_bins, y_rates, 1)
+            y_start = float(np.clip(intercept, 0.0, max_y))
+            y_end = float(np.clip(slope * (n_bins - 1) + intercept, 0.0, max_y))
+
+            pt1 = (collected_pts[0][0], plot_y + plot_h - int((y_start / max_y) * plot_h))
+            pt2 = (collected_pts[-1][0], plot_y + plot_h - int((y_end / max_y) * plot_h))
+            cv2.line(img, pt1, pt2, self.BORDER_COLOR, 1, cv2.LINE_AA)
+
+            trend_label = f"Collected Trend: {slope:+.2f} / {bin_size} logs"
+            cv2.putText(img, trend_label, (plot_x, plot_y - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.BORDER_COLOR, 1, cv2.LINE_AA)
+
+        for cx, cy, val in collected_pts:
+            cv2.circle(img, (cx, cy), 4, self.primary_color, -1, cv2.LINE_AA)
+            cv2.circle(img, (cx, cy), 5, (255, 255, 255), 1, cv2.LINE_AA)
+            if n_bins <= 18:
+                cv2.putText(img, str(val), (cx - 8, max(cy - 8, plot_y + 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.36, self.primary_color, 1, cv2.LINE_AA)
+
+        # 4. Epoch boundary dashed dividers & labels (without count)
+        if epoch_boundaries:
+            for idx, (start_idx, label, _) in enumerate(epoch_boundaries):
+                end_idx = epoch_boundaries[idx + 1][0] if idx + 1 < len(epoch_boundaries) else total_logs
+                x0 = plot_x + int((start_idx / bin_size) * slot_w)
+                x1 = min(plot_x + int((end_idx / bin_size) * slot_w), plot_x + plot_w)
+
+                if idx > 0:
+                    for y_dash in range(plot_y, plot_y + plot_h, 10):
+                        cv2.line(img, (x0, y_dash), (x0, min(y_dash + 5, plot_y + plot_h)),
+                                 self.BORDER_COLOR, 1, cv2.LINE_AA)
+                    tri = np.array([[x0 - 4, plot_y], [x0 + 4, plot_y], [x0, plot_y + 6]], dtype=np.int32)
+                    cv2.fillPoly(img, [tri], self.BORDER_COLOR)
+
+                band_w = x1 - x0
+                if band_w > 28:
+                    ep_lbl = f"E{idx + 1}" if band_w < 95 else f"E{idx + 1}: {label[:12]}"
+                    cv2.putText(img, ep_lbl, (x0 + 5, plot_y + 16),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.36, self.BORDER_COLOR, 1, cv2.LINE_AA)
+
+        cv2.putText(img, f'Consecutive Log Bins (Bin Size: {bin_size} logs) ->',
+                    (plot_x + plot_w // 2 - 145, plot_y + plot_h + 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, self.TEXT_MAIN, 1, cv2.LINE_AA)

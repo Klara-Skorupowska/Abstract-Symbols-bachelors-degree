@@ -62,6 +62,7 @@ def agent_loop(bus: Communicator, agent: Agent, config: dict, stop_event: thread
                     epoch_idx += 1
                     break
 
+            agent.reset_logs_memory()
             epoch_idx += 1
 
         if tests_at_end > 0:

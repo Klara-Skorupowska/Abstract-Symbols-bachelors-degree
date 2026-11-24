@@ -5,7 +5,7 @@
     <ProjectGuid>3262c0fc-6a77-457e-8048-af9f6f9eef33</ProjectGuid>
     <ProjectHome>
     </ProjectHome>
-    <StartupFile>main.py</StartupFile>
+    <StartupFile>run_experiments.py</StartupFile>
     <SearchPath>
     </SearchPath>
     <WorkingDirectory>.</WorkingDirectory>
@@ -25,17 +25,11 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="additional_scripts\brain_viewer.py" />
     <Compile Include="additional_scripts\exec_stats.py" />
     <Compile Include="additional_scripts\exec_stats_cumulative.py" />
-    <Compile Include="additional_scripts\notes.py" />
     <Compile Include="additional_scripts\2D_predicate.py" />
-    <Compile Include="additional_scripts\optimize_hyperparams.py" />
-    <Compile Include="additional_scripts\overlapings.py" />
-    <Compile Include="additional_scripts\parameter_finder.py" />
     <Compile Include="additional_scripts\rebuild_brain_gng.py" />
-    <Compile Include="additional_scripts\transition_analysis.py" />
-    <Compile Include="additional_scripts\tune_hypers.py" />
+    <Compile Include="additional_scripts\regenerate_experiment_pics.py" />
     <Compile Include="agent\predicate.py" />
     <Compile Include="agent\session_utils.py" />
     <Compile Include="agent\symbol_generator.py" />
@@ -49,6 +43,7 @@
     <Compile Include="agent\virtual_sensor.py" />
     <Compile Include="communicator.py" />
     <Compile Include="agent\__init__.py" />
+    <Compile Include="run_experiments.py" />
     <Compile Include="simulation\environment.py" />
     <Compile Include="simulation\real_actuator.py" />
     <Compile Include="simulation\arena.py" />
@@ -65,6 +60,7 @@
     <Compile Include="supervisor\generators\exec_stats.py" />
     <Compile Include="supervisor\generators\histogram.py" />
     <Compile Include="supervisor\generators\pipeline.py" />
+    <Compile Include="supervisor\generators\symbols_repr.py" />
     <Compile Include="supervisor\generators\__init__.py" />
     <Compile Include="supervisor\loggers\base.py" />
     <Compile Include="supervisor\loggers\execution_stats.py" />

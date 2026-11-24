@@ -22,7 +22,15 @@ from supervisor.loggers import ExecutionStatsLogger, TestSummaryLogger
 class TheAgent(Agent):
     """Agent capable of autonomous skill execution, PDDL planning, and continuous symbolic learning."""
 
-    def __init__(self, bus: Communicator, how_many_runs: int, how_many_tests: int, source_dir: str = 'new'):
+    def __init__(
+        self,
+        bus: Communicator,
+        how_many_runs: int,
+        how_many_tests: int,
+        source_dir: str = 'new',
+        session_dir: str | Path | None = None,
+        brain_params: dict | None = None,
+    ):
         super().__init__(bus)
         self.wheels = WheelsActuator(self.bus)
         self.lidars = VirtualSensorArray(
@@ -53,9 +61,12 @@ class TheAgent(Agent):
             'finish': Finish(bus, 26, self.camera, self.lidars, self.wheels, velocity, save_dist=save_dist, timeout=1.0),
         }
 
-        # 1. Create session directory (session root: logs/YYYY-MM-DD_HH-MM)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        self.session_dir = Path("logs") / timestamp
+        # 1. Create session directory (defaults to logs/YYYY-MM-DD_HH-MM)
+        if session_dir is not None:
+            self.session_dir = Path(session_dir)
+        else:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            self.session_dir = Path("logs") / timestamp
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir = str(self.session_dir)
 
@@ -88,9 +99,10 @@ class TheAgent(Agent):
         self.batch_update_count = 0
         self.completed_plans_count = 0
         self.timestamps = []
+        self.updatefreq = []
 
         # 4. Instantiate and load brain: Brain initialized with log_dir=None to prevent root session pollution
-        self.brain = BrainNetwork(log_dir=None)
+        self.brain = BrainNetwork(log_dir=None, brain_params=brain_params)
         if source_epoch_dir:
             self.brain.load_brain(source_epoch_dir)
         self.brain.prepare_nodes(self.skillset.keys())
@@ -130,6 +142,22 @@ class TheAgent(Agent):
         self.reset_requested = False
         self.bus.call_service("/supervisor/do/restart")
         self.bus.call_service("/supervisor/do/FinishReset")
+    
+    def reset_logs_memory(self):
+        self.transition_records = []
+        self.skill_stats = {
+            name: {'true_positive': 0, 'true_negative': 0, 'false_positive': 0, 'false_negative': 0}
+            for name in self.skillset.keys()
+        }
+        self.logs = []
+        self.start_time = None
+        self.end_time = None
+        self.run_count = 0
+        self.batch_update_count = 0
+        self.completed_plans_count = 0
+        #self.timestamps = []
+        self.updatefreq = []
+
 
     def _logger(self, run: int):
         if not self.exec_logger:
@@ -148,6 +176,7 @@ class TheAgent(Agent):
             continued_from=self.continued_from
         )
         self.exec_logger.log_timestamps(self.timestamps)
+        self.exec_logger.log_updatefreq(self.updatefreq)
 
     def record_transition(self, prev_state: np.ndarray, skill_name: str, post_state: np.ndarray, succeed: bool):
         self.transition_records.append({
@@ -211,6 +240,7 @@ class TheAgent(Agent):
                     status = self.brain.predicates_status(skill_name, state_before)
 
                     success = self.execute_skill(skill_name)
+                    self.updatefreq.append("PLAN")
                     if not success:
                         print("[Agent] Failed action. Abandoning the plan.")
                         plan_completed = False
@@ -293,6 +323,7 @@ class TheAgent(Agent):
         print("[Agent] Explore")
         skill_name = random.choice(list(self.skillset.keys()))
         state_before, _ = self.read_state()
+        self.updatefreq.append("EXPLORE")
         if self.execute_skill(skill_name):
             state_after, _ = self.read_state()
             self.add_to_buffer((state_before, skill_name, state_after))
@@ -303,6 +334,7 @@ class TheAgent(Agent):
     def add_to_buffer(self, data: tuple):
         self.data_buffer.append(data)
         self.timestamps.append(time.time())
+        self.updatefreq.append("COLLECTED")
         print(f"[Agent] Add data to buffer. {len(self.data_buffer)}/{self.buffer_max_len}")
         if len(self.data_buffer) >= self.buffer_max_len:
             self.bus.call_service("/supervisor/do/switchSleep")
@@ -419,7 +451,7 @@ class TheAgent(Agent):
             print(f"[Agent] Test {i+1}/{self.N_tests}.")
             start = time.time()
 
-            self.bus.call_service("/supervisor/do/restart")
+            self._reset_and_restart()
             time.sleep(1.0)
 
             raw_spawn = self.bus.call_service("/supervisor/ask/position")
@@ -429,6 +461,14 @@ class TheAgent(Agent):
                 spawn_pos = [float(x) if hasattr(x, "item") else x for x in raw_spawn]
             else:
                 spawn_pos = raw_spawn
+
+            vector_state, active_symbols = self.read_state()
+            symbols_map = self.brain.symbol_gen.get_all_symbols()
+            print(
+                f"[DEBUG] num_symbols={len(symbols_map)}, "
+                f"state_norm={np.linalg.norm(vector_state):.4f}, "
+                f"active={active_symbols}"
+            )
 
             self.bus.call_service("/supervisor/do/switchThink")
             plan = self.generate_plan(goal_skill='finish', plan_name=f"test_{i}")

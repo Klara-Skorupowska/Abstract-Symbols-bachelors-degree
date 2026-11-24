@@ -10,12 +10,12 @@ class GNG:
     """Zoptymalizowana sieć Growing Neural Gas dla wysokich wymiarów."""
     def __init__(self, max_points=20, dim=None, base_radius=0.1, max_radius=1.0,
                  learning_rate_b=0.2, learning_rate_n=0.006,
-                 max_edge_age=50, lambda_step=10, alpha=0.5, d=0.995):
+                 max_edge_age=50, lambda_step=10, alpha=0.5, d=0.995, radii_factor=0.5):
         self.dim = int(dim) if dim is not None else None
-        self.max_points = max_points
+        self.max_points = int(max_points)
         self.base_radius = float(base_radius)
         self.max_radius = float(max_radius)
-        self.radii_factor = 0.5
+        self.radii_factor = float(radii_factor)
         self.eb = float(learning_rate_b)
         self.en = float(learning_rate_n)
         self.max_age = int(max_edge_age)
@@ -56,17 +56,19 @@ class GNG:
         if n == 0:
             self.cached_radii = np.empty((0,), dtype=np.float64)
             return
+        if n == 1:
+            self.cached_radii = np.full(1, self.base_radius, dtype=np.float64)
+            return
 
-        radii = np.full(n, self.base_radius, dtype=np.float64)
+        dists = cdist(self.nodes, self.nodes, metric='euclidean')
+        np.fill_diagonal(dists, np.inf)
+        min_dists = np.min(dists, axis=1)
 
-        for i in range(n):
-            nbrs = list(self.adj.get(i, ()))
-            if nbrs:
-                diff = self.nodes[nbrs] - self.nodes[i]
-                min_d = np.min(np.sqrt(np.sum(diff * diff, axis=1)))
-                radii[i] = np.clip(min_d * self.radii_factor, self.base_radius, self.max_radius)
-
-        self.cached_radii = radii
+        self.cached_radii = np.clip(
+            min_dists * self.radii_factor,
+            self.base_radius,
+            self.max_radius,
+        )
 
     def _get_local_radius(self, node_idx):
         if self.cached_radii is None:
@@ -207,15 +209,16 @@ class GNG:
     def serialize(self) -> dict:
         parameters = {
             "max_points": self.max_points,
+            "dim": self.dim,
             "base_radius": self.base_radius,
             "max_radius": self.max_radius,
+            "radii_factor": self.radii_factor,
             "learning_rate_b": self.eb,
             "learning_rate_n": self.en,
             "max_edge_age": self.max_age,
             "lambda_step": self.lambda_step,
             "alpha": self.alpha,
             "d": self.d,
-            "dim": self.dim,
         }
         edges_str_keys = {f"{u},{v}": age for (u, v), age in self.edges.items()}
         if self.cached_radii is None:
@@ -223,42 +226,57 @@ class GNG:
 
         return {
             "parameters": parameters,
+            "update_count": self.update_count,
             "nodes": self.nodes.tolist(),
+            "errors": self.errors.tolist(),
             "edges": edges_str_keys,
-            "local_radii": self.cached_radii.tolist()
+            "local_radii": self.cached_radii.tolist(),
         }
 
     def deserialize(self, data: dict):
         if not data:
             return
         params = data.get("parameters", {})
-        self.max_points = params.get("max_points", self.max_points)
-        self.base_radius = params.get("base_radius", self.base_radius)
-        self.max_radius = params.get("max_radius", self.max_radius)
-        self.eb = params.get("learning_rate_b", self.eb)
-        self.en = params.get("learning_rate_n", self.en)
-        self.max_age = params.get("max_edge_age", self.max_age)
-        self.lambda_step = params.get("lambda_step", self.lambda_step)
-        self.alpha = params.get("alpha", self.alpha)
-        self.d = params.get("d", self.d)
-        self.dim = params.get("dim", self.dim)
+        self.max_points = int(params.get("max_points", self.max_points))
+        self.base_radius = float(params.get("base_radius", self.base_radius))
+        self.max_radius = float(params.get("max_radius", self.max_radius))
+        self.radii_factor = float(params.get("radii_factor", self.radii_factor))
+        self.eb = float(params.get("learning_rate_b", self.eb))
+        self.en = float(params.get("learning_rate_n", self.en))
+        self.max_age = int(params.get("max_edge_age", self.max_age))
+        self.lambda_step = int(params.get("lambda_step", self.lambda_step))
+        self.alpha = float(params.get("alpha", self.alpha))
+        self.d = float(params.get("d", self.d))
+
+        raw_dim = params.get("dim", self.dim)
+        self.dim = int(raw_dim) if raw_dim is not None else None
+        self.update_count = int(data.get("update_count", self.update_count))
 
         if "nodes" in data:
             nodes_data = data["nodes"]
-            self.nodes = np.array(nodes_data, dtype=np.float64) if nodes_data else np.empty((0, self.dim or 0))
-            self.errors = np.zeros(len(self.nodes), dtype=np.float64)
-            if self.dim is None and len(self.nodes) > 0:
-                self.dim = self.nodes.shape[1]
+            if nodes_data:
+                self.nodes = np.array(nodes_data, dtype=np.float64)
+                if self.dim is None and self.nodes.ndim == 2:
+                    self.dim = self.nodes.shape[1]
+            else:
+                self.nodes = np.empty((0, self.dim if self.dim is not None else 0), dtype=np.float64)
+
+            if "errors" in data and len(data["errors"]) == len(self.nodes):
+                self.errors = np.array(data["errors"], dtype=np.float64)
+            else:
+                self.errors = np.zeros(len(self.nodes), dtype=np.float64)
 
         if "local_radii" in data:
             self.cached_radii = np.array(data["local_radii"], dtype=np.float64)
+        else:
+            self.cached_radii = None
 
         if "edges" in data:
             self.edges = {}
             for k, v in data["edges"].items():
                 u, v_node = map(int, k.split(","))
                 edge = (u, v_node) if u < v_node else (v_node, u)
-                self.edges[edge] = v
+                self.edges[edge] = int(v)
             self.adj = {}
             for u, v in self.edges.keys():
                 self.adj.setdefault(u, set()).add(v)
@@ -268,13 +286,20 @@ class Predicate:
     """Predykat owijający rozmaitość GNG w pełnej przestrzeni percepcyjnej."""
     def __init__(self, max_points=20, dim=None, base_radius=0.1, max_radius=1.0,
                  learning_rate_b=0.2, learning_rate_n=0.006,
-                 max_edge_age=50, lambda_step=10, alpha=0.5, d=0.995):
+                 max_edge_age=50, lambda_step=10, alpha=0.5, d=0.995, radii_factor=0.5):
         self.gng = GNG(
             max_points=max_points, dim=dim, base_radius=base_radius, max_radius=max_radius,
             learning_rate_b=learning_rate_b, learning_rate_n=learning_rate_n,
-            max_edge_age=max_edge_age, lambda_step=lambda_step, alpha=alpha, d=d
+            max_edge_age=max_edge_age, lambda_step=lambda_step, alpha=alpha, d=d,
+            radii_factor=radii_factor,
         )
         self.dim = int(dim) if dim is not None else None
+
+    @property
+    def radii(self) -> np.ndarray:
+        if self.gng.cached_radii is None:
+            self.gng._recompute_radii()
+        return self.gng.cached_radii
 
     @property
     def nodes(self):
@@ -310,7 +335,8 @@ class Predicate:
             max_edge_age=self.gng.max_age,
             lambda_step=self.gng.lambda_step,
             alpha=self.gng.alpha,
-            d=self.gng.d
+            d=self.gng.d,
+            radii_factor=self.gng.radii_factor,
         )
 
         if self.gng.num_nodes == 0:
@@ -334,6 +360,10 @@ class Predicate:
             nearest = np.argmin(dists, axis=1)
             for i, near_i in enumerate(nearest):
                 new_pred.gng._add_edge(i, near_i, age=0)
+
+        if self.gng.cached_radii is None:
+            self.gng._recompute_radii()
+        new_pred.gng.cached_radii = self.gng.cached_radii[selected].copy()
 
         return new_pred
 
@@ -405,15 +435,17 @@ class Predicate:
         if not log_dir:
             return
         os.makedirs(log_dir, exist_ok=True)
+        gng_serialized = self.gng.serialize()
         data = {
-            "gng": self.gng.serialize(),
-            "dim": self.dim,
+            "dim": self.dim if self.dim is not None else self.gng.dim,
+            "parameters": gng_serialized["parameters"],
+            "gng": gng_serialized,
         }
         unique_id = uuid.uuid4().hex
         temp_file = os.path.join(log_dir, f"{pred_name}_{unique_id}.tmp")
         file_path = os.path.join(log_dir, f"{pred_name}.json")
 
-        with open(temp_file, "w") as f:
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
         for _ in range(5):
@@ -429,15 +461,35 @@ class Predicate:
                 except OSError:
                     pass
 
-    def load_predicate(self, file_path):
-        with open(file_path, "r") as f:
+    def load_predicate(self, file_path) -> "Predicate":
+        with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         gng_data = data.get("gng", {})
-        params = gng_data.get("parameters", {})
-        dim = data.get("dim", params.get("dim", None))
+        params = {**data.get("parameters", {}), **gng_data.get("parameters", {})}
+        dim = data.get("dim", params.get("dim", self.dim))
+        if dim is not None:
+            params["dim"] = int(dim)
 
         self.dim = int(dim) if dim is not None else None
-        self.gng = GNG(**params)
+        self.gng = GNG(
+            max_points=params.get("max_points", self.gng.max_points),
+            dim=self.dim,
+            base_radius=params.get("base_radius", self.gng.base_radius),
+            max_radius=params.get("max_radius", self.gng.max_radius),
+            learning_rate_b=params.get("learning_rate_b", self.gng.eb),
+            learning_rate_n=params.get("learning_rate_n", self.gng.en),
+            max_edge_age=params.get("max_edge_age", self.gng.max_age),
+            lambda_step=params.get("lambda_step", self.gng.lambda_step),
+            alpha=params.get("alpha", self.gng.alpha),
+            d=params.get("d", self.gng.d),
+            radii_factor=params.get("radii_factor", self.gng.radii_factor),
+        )
         self.gng.deserialize(gng_data)
+        if self.dim is None and self.gng.dim is not None:
+            self.dim = self.gng.dim
         return self
+
+    @classmethod
+    def from_file(cls, file_path, **default_kwargs) -> "Predicate":
+        return cls(**default_kwargs).load_predicate(file_path)

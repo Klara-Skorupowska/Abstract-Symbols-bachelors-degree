@@ -56,3 +56,15 @@ class ExecutionStatsLogger(BaseLogger):
         with open(path, 'w') as f:
             for stmp in timestamps:
                 f.write(f"{stmp}\n")
+
+    def log_updatefreq(self, updatefreq: list, filename: str = "updatefreq.txt"):
+        path = self.get_path(filename)
+        if not path:
+            return
+        with open(path, 'w') as f:
+            for dt in updatefreq:
+                if not (dt == "COLLECTED"):
+                    f.write(f"\n{dt}")
+                else:
+                    f.write(f" {dt}")
+

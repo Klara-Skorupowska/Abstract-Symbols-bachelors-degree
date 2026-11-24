@@ -10,9 +10,13 @@
 ()  - zrobione, a nie było planowane
 ---------------------------------------
 ---------------------------------------
+### 17.11.2026 ###
+[o] wrócić do kategorii, w której duże zmiany w kolorach nie są wyświetlane, niech 'active dims' informuje ile zostało jako stałe
+[o] OBRAZKI
+[] testy hiperparametrów?
 
 ### 05.11.2026 ###
-[] poprawić renderowanie... (braki w strukturze)
+[o] poprawić renderowanie... (braki w strukturze)
 [o] przejrzeć abtrahowanie: wszytko ma się dziać na poziomie stanów, nie wymiarów
 () poprawki w logice, znowu
 [!] analiza wpływu hiperparametrów - kod i wykresy

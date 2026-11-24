@@ -36,7 +36,7 @@ def main(config: dict):
     )
     supervisor_thread = threading.Thread(
         target=supervisor_loop,
-        args=(bus, supervisor_ready_event, stop_event),
+        args=(bus, supervisor_ready_event, stop_event, session_dir),
         daemon=True
     )
     agent_thread = threading.Thread(
@@ -65,9 +65,9 @@ if __name__ == "__main__":
         "source_dir": "continue",          
         "runs_per_epoch": 1000,        
         "tests_between": 5,           
-        "tests_at_end": 100,           
+        "tests_at_end": 10,           
         "time_limit": None,            
         "min_success_rate": 0.75,      
-        "max_epochs": 50              
+        "max_epochs": 0              
     }
     main(hyperparameters)
